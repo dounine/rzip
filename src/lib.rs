@@ -1,7 +1,8 @@
-pub mod zip;
 mod directory;
 mod extra;
 mod file;
+pub mod util;
+pub mod zip;
 
 pub fn add(left: u64, right: u64) -> u64 {
     left + right

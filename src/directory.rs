@@ -1,8 +1,9 @@
 use crate::file::{ExtraList, ZipFile};
 use crate::zip::{Magic, ZipModel};
-use binrw::{BinResult, binrw};
+use binrw::{BinResult, Error, binrw};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::string::FromUtf8Error;
+use crate::util::stream_length;
 
 #[binrw]
 #[brw(repr(u16))]
@@ -30,6 +31,14 @@ pub struct Name {
     #[br(count = count)]
     pub inner: Vec<u8>,
 }
+impl Name {
+    pub fn into_string(self, pos: u64) -> BinResult<String> {
+        self.clone().try_into().map_err(|e| Error::Custom {
+            pos,
+            err: Box::new(e),
+        })
+    }
+}
 impl TryInto<String> for Name {
     type Error = FromUtf8Error;
 
@@ -39,12 +48,13 @@ impl TryInto<String> for Name {
 }
 
 #[binrw]
-#[brw(little,import(model:ZipModel,))]
+#[brw(little, import(model:ZipModel,))]
 #[derive(Debug, Clone)]
 pub struct Directory<T: Read + Write + Seek + Default> {
     #[brw(ignore)]
     pub compressed: bool,
-    magic: Magic,
+    #[bw(calc = Magic::Directory)]
+    _magic: Magic,
     pub created_zip_spec: u8,
     pub created_os: u8,
     pub extract_zip_spec: u8,
@@ -72,12 +82,26 @@ pub struct Directory<T: Read + Write + Seek + Default> {
     pub extra_fields: ExtraList,
     #[br(count=file_comment_length)]
     pub file_comment: Vec<u8>,
-    #[br(restore_position,seek_before = SeekFrom::Start(offset_of_local_file_header as u64), args(compressed_size,uncompressed_size,crc_32_uncompressed_data,))]
+    #[br(restore_position,seek_before = SeekFrom::Start(offset_of_local_file_header as u64), args(compressed_size,uncompressed_size,crc_32_uncompressed_data,)
+    )]
     #[bw(if(model != ZipModel::Package))]
     pub file: ZipFile,
-    #[br(restore_position,seek_before = SeekFrom::Start(file.data_position), parse_with = data_init,args(T::default(),file.compressed_size,))]
+    #[br(restore_position,seek_before = SeekFrom::Start(file.data_position), parse_with = data_init,args(T::default(),file.compressed_size,)
+    )]
     #[bw(ignore)]
     pub data: T,
+}
+impl<T: Read + Write + Seek + Default> Directory<T> {
+    pub fn put_data(&mut self, mut stream: T) -> BinResult<()> {
+        let length = stream_length(&mut stream)? as u32;
+        self.compressed_size = length;
+        self.uncompressed_size = length;
+        self.file.compressed_size = self.compressed_size;
+        self.file.uncompressed_size = self.uncompressed_size;
+        self.compressed = false;
+        self.data = stream;
+        Ok(())
+    }
 }
 #[binrw::parser(reader)]
 pub fn data_init<T: Write + Seek + Default>(mut data: T, compressed_size: u32) -> BinResult<T> {

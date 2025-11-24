@@ -2,7 +2,6 @@ use crate::directory::{CompressionMethod, Name};
 use crate::extra::Extra;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, binrw};
 use std::io::{Cursor, Read, Seek, Write};
-use std::ops::Deref;
 
 #[binrw]
 #[brw(little,magic=0x04034b50_u32,import(compressed_size2:u32,uncompressed_size:u32,crc_32_uncompressed_data:u32))]
@@ -28,6 +27,7 @@ pub struct ZipFile {
     // #[br(map = |value| std::cmp::max(uncompressed_size,value))]
     // #[bw(map = |value| std::cmp::max(*uncompressed_size,*value))]
     pub uncompressed_size: u32,
+    #[bw(calc = file_name.inner.len() as u16)]
     pub file_name_length: u16,
     #[bw(try_calc = extra_fields.bytes())]
     pub extra_field_length: u16,
@@ -51,6 +51,11 @@ pub fn stream_position() -> BinResult<u64> {
 }
 #[derive(Debug, Clone)]
 pub struct ExtraList(pub Vec<Extra>);
+impl From<Vec<Extra>> for ExtraList {
+    fn from(value: Vec<Extra>) -> Self {
+        ExtraList(value)
+    }
+}
 impl ExtraList {
     pub fn bytes(&self) -> BinResult<u16> {
         let mut cursor = Cursor::new(vec![]);
@@ -100,13 +105,13 @@ impl BinWrite for ExtraList {
         Ok(())
     }
 }
-impl Deref for ExtraList {
-    type Target = Vec<Extra>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+// impl Deref for ExtraList {
+//     type Target = Vec<Extra>;
+//
+//     fn deref(&self) -> &Self::Target {
+//         &self.0
+//     }
+// }
 // const ZIP_FILE_HEADER_SIZE: usize = size_of::<Magic>()
 //     + size_of::<u16>() * 2
 //     + size_of::<CompressionMethod>()
