@@ -91,24 +91,24 @@ where
     }
 }
 
-impl<T1> FastZip<T1>
+impl<D> FastZip<D>
 where
-    T1: Read + Write + Seek + Default,
+    D: Read + Write + Seek + Default,
 {
-    pub fn parse<T: Read + Seek>(reader: &mut T) -> BinResult<FastZip<T1>> {
+    pub fn parse<T: Read + Seek>(reader: &mut T) -> BinResult<FastZip<D>> {
         FastZip::read_le_args(reader, (ZipModel::Parse,))
     }
     pub fn remove_file(&mut self, file_name: &str) {
         self.directories.swap_remove(file_name.as_bytes());
     }
-    pub fn save_file(&mut self, data: T1, file_name: &str) -> BinResult<()> {
+    pub fn save_file(&mut self, data: D, file_name: &str) -> BinResult<()> {
         if let Some(dir) = self.directories.get_mut(file_name.as_bytes()) {
             return dir.put_data(data);
         }
         self.add_file(data, file_name)?;
         Ok(())
     }
-    pub fn add_directory(&mut self, mut dir: Directory<T1>) -> BinResult<()> {
+    pub fn add_directory(&mut self, mut dir: Directory<D>) -> BinResult<()> {
         if dir.file_name.inner != dir.file.file_name.inner {
             dir.file.file_name = dir.file_name.clone();
         }
@@ -127,7 +127,7 @@ where
         let ratio = non_text_count as f32 / data.len() as f32;
         ratio > bin_threshold
     }
-    pub fn add_file(&mut self, mut data: T1, file_name: &str) -> BinResult<()> {
+    pub fn add_file(&mut self, mut data: D, file_name: &str) -> BinResult<()> {
         let length = stream_length(&mut data)?;
         let uncompressed_size = length as u32;
         let crc_32_uncompressed_data = 0; //data.crc32_value();
@@ -235,22 +235,23 @@ where
         compression_level: CompressionLevel,
         callback: &mut impl FnMut(usize, usize, String),
     ) -> BinResult<()> {
-        let mut header = T1::default();
+        let mut header = D::default();
         let mut files_size = 0;
         let mut directors_size = 0;
         let mut binding = 0;
         let total_size = self.computer_un_compress_size()?;
         let mut callback = Self::create_adapter(total_size, &mut binding, callback);
         for (_, director) in &mut self.directories.0 {
+            let dd = director.file_name.inner == b"hello/nihao.txt";
             director.compress(true, &compression_level, &mut callback)?;
 
             director.offset_of_local_file_header = files_size as u32;
-            let mut directory_writer = T1::default();
+            let mut directory_writer = D::default();
             directory_writer.write_le_args(director, (ZipModel::Package,))?;
             directory_writer.seek(SeekFrom::Start(0))?;
             directors_size += std::io::copy(&mut directory_writer, &mut header)?;
 
-            let mut file_writer = T1::default();
+            let mut file_writer = D::default();
             let file = &director.file;
             file_writer.write_le(&file)?;
             file_writer.seek(SeekFrom::Start(0))?;

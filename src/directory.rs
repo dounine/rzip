@@ -103,7 +103,7 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
         callback_fun: &mut impl FnMut(usize),
     ) -> BinResult<()> {
         if !self.compressed && self.compression_method == CompressionMethod::Deflate {
-            let mut data = Cursor::new(Vec::with_capacity(self.compressed_size as usize));
+            let mut data = Cursor::new(Vec::with_capacity(self.uncompressed_size as usize));
             let crc_32_uncompressed_data = if crc32_computer {
                 let mut hasher = crc32fast::Hasher::new();
                 self.data.seek(SeekFrom::Start(0))?;
@@ -126,10 +126,10 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
             self.crc_32_uncompressed_data = crc_32_uncompressed_data; //crc32 设置为0也能安装，网页可以忽略计算加快速度
             self.file.crc_32_uncompressed_data = crc_32_uncompressed_data;
             let data = data.into_inner();
-            let writer = &mut self.data;
+            let mut compress_data = T::default();
             miniz_oxide::deflate::stream::compress_stream_callback(
                 &data,
-                writer,
+                &mut compress_data,
                 compression_level,
                 callback_fun,
             )
@@ -137,6 +137,9 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
                 pos: 0,
                 err: Box::new(e),
             })?;
+            self.compressed_size = stream_length(&mut compress_data)? as u32;
+            self.file.compressed_size = self.compressed_size;
+            self.data = compress_data;
         }
         Ok(())
     }

@@ -58,6 +58,12 @@ fn main() {
     let mut writer = Cursor::new(vec![]);
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
     zip_file
+        .add_file(
+            MyData::Mem(Cursor::new(b"hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao".into())),
+            "hello/nihao.txt",
+        )
+        .unwrap();
+    zip_file
         .package(
             &mut writer,
             CompressionLevel::DefaultLevel,
