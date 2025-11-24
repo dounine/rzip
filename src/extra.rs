@@ -154,12 +154,12 @@ impl BinRead for Extra {
                 }
             }
             0x5455 => {
-                let mut length: u16 = reader.read_type_args(endian, ())?;
+                let mut length: u16 = reader.read_type(endian)?;
                 length -= 1;
-                let flags: u8 = reader.read_type_args(endian, ())?;
+                let flags: u8 = reader.read_type(endian)?;
                 let mtime = if flags & 0x01 != 0 {
                     length -= 4;
-                    Some(reader.read_type_args(endian, ())?)
+                    Some(reader.read_type(endian)?)
                 } else {
                     None
                 };
@@ -168,7 +168,7 @@ impl BinRead for Extra {
                         None
                     } else {
                         length -= 4;
-                        Some(reader.read_type_args(endian, ())?)
+                        Some(reader.read_type(endian)?)
                     }
                 } else {
                     None
@@ -178,7 +178,7 @@ impl BinRead for Extra {
                         None
                     } else {
                         length -= 4;
-                        Some(reader.read_type_args(endian, ())?)
+                        Some(reader.read_type(endian)?)
                     }
                 } else {
                     None
@@ -200,21 +200,21 @@ impl BinRead for Extra {
                 }
             }
             0x7875 => {
-                let _length: u16 = reader.read_type_args(endian, ())?;
-                let _version: u8 = reader.read_type_args(endian, ())?;
-                let _uid_size: u8 = reader.read_type_args(endian, ())?;
-                let uid: u32 = reader.read_type_args(endian, ())?;
-                let _gid_size: u8 = reader.read_type_args(endian, ())?;
+                let _length: u16 = reader.read_type(endian)?;
+                let _version: u8 = reader.read_type(endian)?;
+                let _uid_size: u8 = reader.read_type(endian)?;
+                let uid: u32 = reader.read_type(endian)?;
+                let _gid_size: u8 = reader.read_type(endian)?;
                 Self::UnixAttrs {
                     uid,
-                    gid: reader.read_type_args(endian, ())?,
+                    gid: reader.read_type(endian)?,
                 }
             }
             0x000A => {
-                let mut _length: u16 = reader.read_type_args(endian, ())?;
-                let _reserved: u32 = reader.read_type_args(endian, ())?;
+                let mut _length: u16 = reader.read_type(endian)?;
+                let _reserved: u32 = reader.read_type(endian)?;
                 _length -= 4;
-                let tag: u16 = reader.read_type_args(endian, ())?;
+                let tag: u16 = reader.read_type(endian)?;
                 _length -= 2;
                 if tag != 0x0001 {
                     let pos = reader.stream_position()?;
@@ -223,7 +223,7 @@ impl BinRead for Extra {
                         found: Box::new("Tag is invalid in NtfsTimestamp"),
                     });
                 }
-                let size: u16 = reader.read_type_args(endian, ())?;
+                let size: u16 = reader.read_type(endian)?;
                 _length -= 2;
                 if size != 24 {
                     let pos = reader.stream_position()?;
@@ -234,19 +234,19 @@ impl BinRead for Extra {
                 }
                 let mtime: u64 = if _length > 0 {
                     _length -= 8;
-                    reader.read_type_args(endian, ())?
+                    reader.read_type(endian)?
                 } else {
                     0
                 };
                 let atime: u64 = if _length > 0 {
                     _length -= 8;
-                    reader.read_type_args(endian, ())?
+                    reader.read_type(endian)?
                 } else {
                     0
                 };
                 let ctime: u64 = if _length > 0 {
                     _length -= 8;
-                    reader.read_type_args(endian, ())?
+                    reader.read_type(endian)?
                 } else {
                     0
                 };
