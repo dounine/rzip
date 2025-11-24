@@ -1,5 +1,5 @@
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
-use std::io::{Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, Write};
 
 #[derive(Debug, Clone)]
 pub enum Extra {
@@ -18,46 +18,6 @@ pub enum Extra {
         gid: u32,
     },
 }
-impl Extra {
-    pub fn optional_field_size<T: Sized>(field: &Option<T>) -> u16 {
-        match field {
-            None => 0,
-            Some(_) => size_of::<T>() as u16,
-        }
-    }
-    pub fn size(&self) -> u16 {
-        2 + 2 + self.field_size()
-    }
-    pub fn field_size(&self) -> u16 {
-        match self {
-            Extra::NTFS { .. } => 32,
-            Extra::UnixExtendedTimestamp {
-                atime,
-                ctime,
-                mtime,
-                ..
-            } => {
-                1 + Self::optional_field_size(mtime)
-                    + Self::optional_field_size(atime)
-                    + Self::optional_field_size(ctime)
-            }
-            Extra::UnixAttrs { .. } => 11,
-        }
-    }
-    pub fn header_id(&self) -> u16 {
-        match self {
-            Extra::NTFS { .. } => 0x000a,
-            Extra::UnixExtendedTimestamp { .. } => 0x5455,
-            Extra::UnixAttrs { .. } => 0x7875,
-        }
-    }
-    pub fn if_present(val: Option<i32>, if_present: u8) -> u8 {
-        match val {
-            Some(_) => if_present,
-            None => 0,
-        }
-    }
-}
 
 impl BinWrite for Extra {
     type Args<'a> = ();
@@ -68,22 +28,21 @@ impl BinWrite for Extra {
         endian: Endian,
         _args: Self::Args<'_>,
     ) -> BinResult<()> {
-        writer.write_type(&self.header_id(), endian)?;
-        let size = self.field_size();
-        writer.write_type(&size, endian)?;
-        match self {
+        let mut output = Cursor::new(Vec::new());
+        let header_id: u16 = match self {
             Extra::NTFS {
                 mtime,
                 atime,
                 ctime,
                 ..
             } => {
-                writer.write_type(&0_u32, endian)?;
-                writer.write_type(&1_u16, endian)?; //Tag1
-                writer.write_type(&24_u16, endian)?; //Size1
-                writer.write_type(mtime, endian)?;
-                writer.write_type(atime, endian)?;
-                writer.write_type(ctime, endian)?;
+                output.write_type(&0_u32, endian)?;
+                output.write_type(&1_u16, endian)?; //Tag1
+                output.write_type(&24_u16, endian)?; //Size1
+                output.write_type(mtime, endian)?;
+                output.write_type(atime, endian)?;
+                output.write_type(ctime, endian)?;
+                0x000a
             }
             Extra::UnixExtendedTimestamp {
                 mtime,
@@ -92,28 +51,32 @@ impl BinWrite for Extra {
                 ..
             } => {
                 let flags: u8 = 3;
-                // Self::if_present(mtime, 1) | Self::if_present(Some(1), 1 << 1) | Self::if_present(ctime, 1 << 2);
-                writer.write_type(&flags, endian)?;
+                output.write_type(&flags, endian)?;
                 if let Some(mtime) = mtime {
-                    writer.write_type(mtime, endian)?;
+                    output.write_type(mtime, endian)?;
                 }
-                // if !r#type.value() {
                 if let Some(atime) = atime {
-                    writer.write_type(atime, endian)?;
+                    output.write_type(atime, endian)?;
                 }
                 if let Some(ctime) = ctime {
-                    writer.write_type(ctime, endian)?;
+                    output.write_type(ctime, endian)?;
                 }
-                // }
+                0x5455
             }
             Extra::UnixAttrs { uid, gid, .. } => {
-                writer.write_type(&1_u8, endian)?;
-                writer.write_type(&4_u8, endian)?;
-                writer.write_type(uid, endian)?;
-                writer.write_type(&4_u8, endian)?;
-                writer.write_type(gid, endian)?;
+                output.write_type(&1_u8, endian)?;
+                output.write_type(&4_u8, endian)?;
+                output.write_type(uid, endian)?;
+                output.write_type(&4_u8, endian)?;
+                output.write_type(gid, endian)?;
+                0x7875
             }
-        }
+        };
+        writer.write_type(&header_id, endian)?;
+        let size = output.get_ref().len() as u16;
+        writer.write_type(&size, endian)?;
+        output.set_position(0);
+        std::io::copy(&mut output, writer)?;
         Ok(())
     }
 }
@@ -123,12 +86,12 @@ impl BinRead for Extra {
     fn read_options<R: Read + Seek>(
         reader: &mut R,
         endian: Endian,
-        args: Self::Args<'_>,
+        _args: Self::Args<'_>,
     ) -> BinResult<Self> {
-        let id: u16 = reader.read_type_args(endian, ())?;
+        let id: u16 = reader.read_type(endian)?;
         Ok(match id {
             0x5855 => {
-                let mut _length: u16 = u16::read_options(reader, endian, ())?;
+                let mut _length: u16 = reader.read_type(endian)?;
                 let mtime = if _length > 0 {
                     _length -= 4;
                     Some(reader.read_type(endian)?)

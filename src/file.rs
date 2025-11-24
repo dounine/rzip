@@ -1,6 +1,5 @@
 use crate::directory::{CompressionMethod, Name};
 use crate::extra::Extra;
-use crate::zip::Magic;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, binrw};
 use std::io::{Cursor, Read, Seek, Write};
 use std::ops::Deref;
@@ -9,7 +8,7 @@ use std::ops::Deref;
 #[brw(little,magic=0x04034b50_u32,import(compressed_size2:u32,uncompressed_size:u32,crc_32_uncompressed_data:u32))]
 #[derive(Debug, Clone)]
 pub struct ZipFile {
-    #[bw(calc = if file_name.last() == Some(&b'/') { 10 } else { 14 })]
+    #[bw(calc = if file_name.inner.last() == Some(&b'/') { 10 } else { 14 })]
     pub extract_zip_spec: u8,
     pub extract_os: u8,
     #[br(map = |flags:u16| if flags & 0x0008 != 0 { 0 } else { flags })]

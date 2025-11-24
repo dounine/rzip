@@ -2,7 +2,6 @@ use crate::file::{ExtraList, ZipFile};
 use crate::zip::{Magic, ZipModel};
 use binrw::{BinResult, binrw};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::ops::Deref;
 use std::string::FromUtf8Error;
 
 #[binrw]
@@ -31,13 +30,6 @@ pub struct Name {
     #[br(count = count)]
     pub inner: Vec<u8>,
 }
-impl Deref for Name {
-    type Target = Vec<u8>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
 impl TryInto<String> for Name {
     type Error = FromUtf8Error;
 
@@ -45,9 +37,7 @@ impl TryInto<String> for Name {
         String::from_utf8(self.inner)
     }
 }
-pub struct Data<T: Read + Write + Seek> {
-    data: Box<T>,
-}
+
 #[binrw]
 #[brw(little,import(model:ZipModel,))]
 #[derive(Debug, Clone)]
@@ -66,7 +56,7 @@ pub struct Directory<T: Read + Write + Seek + Default> {
     pub crc_32_uncompressed_data: u32,
     pub compressed_size: u32,
     pub uncompressed_size: u32,
-    #[bw(calc = file_name.len() as u16)]
+    #[bw(calc = file_name.inner.len() as u16)]
     pub file_name_length: u16,
     #[bw(try_calc = extra_fields.bytes())]
     pub extra_field_length: u16,
