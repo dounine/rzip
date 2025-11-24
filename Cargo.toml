@@ -1,0 +1,20 @@
+[package]
+name = "rzip"
+version = "0.1.0"
+edition = "2024"
+
+exclude = ["example"]
+
+[workspace]
+members = ["example", "."]
+
+[dependencies]
+binrw = "0.15.0"
+indexmap = "2.12.1"
+[dependencies.miniz_oxide]
+git = "https://github.com/dounine/miniz_oxide"
+#optional = true
+#
+#[features]
+#default = []
+#deflate = ["miniz_oxide"]
