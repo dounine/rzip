@@ -1,4 +1,4 @@
-use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
+use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use std::io::{Read, Seek, Write};
 
 #[derive(Debug, Clone)]
@@ -66,7 +66,7 @@ impl BinWrite for Extra {
         &self,
         writer: &mut W,
         endian: Endian,
-        args: Self::Args<'_>,
+        _args: Self::Args<'_>,
     ) -> BinResult<()> {
         writer.write_type(&self.header_id(), endian)?;
         let size = self.field_size();
@@ -131,19 +131,19 @@ impl BinRead for Extra {
                 let mut _length: u16 = u16::read_options(reader, endian, ())?;
                 let mtime = if _length > 0 {
                     _length -= 4;
-                    Some(BinRead::read_options(reader, endian, ())?)
+                    Some(reader.read_type(endian)?)
                 } else {
                     None
                 };
                 let atime = if _length > 0 {
                     _length -= 4;
-                    Some(BinRead::read_options(reader, endian, ())?)
+                    Some(reader.read_type(endian)?)
                 } else {
                     None
                 };
                 let ctime = if _length > 0 {
                     _length -= 4;
-                    Some(BinRead::read_options(reader, endian, ())?)
+                    Some(reader.read_type(endian)?)
                 } else {
                     None
                 };

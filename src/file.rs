@@ -1,10 +1,7 @@
 use crate::directory::{CompressionMethod, Name};
-use crate::extra::{Extra,};
+use crate::extra::Extra;
 use crate::zip::Magic;
-use binrw::{
-    BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, NamedArgs, VecArgs, binread,
-    binrw,
-};
+use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, binrw};
 use std::io::{Cursor, Read, Seek, Write};
 use std::ops::Deref;
 
@@ -39,9 +36,9 @@ pub struct ZipFile {
     pub file_name: Name,
     #[br(args(extra_field_length))]
     pub extra_fields: ExtraList,
-    #[br(ignore)]
-    #[bw(ignore)]
-    pub data_descriptor: Option<DataDescriptor>,
+    // #[br(ignore)]
+    // #[bw(ignore)]
+    // pub data_descriptor: Option<DataDescriptor>,
     #[br(parse_with = stream_position)]
     #[bw(ignore)]
     pub data_position: u64,
@@ -111,20 +108,20 @@ impl Deref for ExtraList {
         &self.0
     }
 }
-const ZIP_FILE_HEADER_SIZE: usize = size_of::<Magic>()
-    + size_of::<u16>() * 2
-    + size_of::<CompressionMethod>()
-    + size_of::<u16>() * 2
-    + size_of::<u32>() * 3
-    + size_of::<u16>() * 2;
-#[derive(Debug, Clone)]
-pub struct DataDescriptor {
-    pub crc32: u32,
-    pub compressed_size: u32,
-    pub uncompressed_size: u32,
-}
-impl DataDescriptor {
-    pub fn size() -> usize {
-        4 * 4
-    }
-}
+// const ZIP_FILE_HEADER_SIZE: usize = size_of::<Magic>()
+//     + size_of::<u16>() * 2
+//     + size_of::<CompressionMethod>()
+//     + size_of::<u16>() * 2
+//     + size_of::<u32>() * 3
+//     + size_of::<u16>() * 2;
+// #[derive(Debug, Clone)]
+// pub struct DataDescriptor {
+//     pub crc32: u32,
+//     pub compressed_size: u32,
+//     pub uncompressed_size: u32,
+// }
+// impl DataDescriptor {
+//     pub fn size() -> usize {
+//         4 * 4
+//     }
+// }

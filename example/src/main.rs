@@ -1,8 +1,7 @@
-use binrw::{BinRead, BinResult, BinWrite, Endian};
-use fast_zip::zip::{FastZip, ZipModel};
+use binrw::{BinRead, BinWrite};
+use fast_zip::zip::FastZip;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::SeekFrom::Current;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 #[derive(Debug)]

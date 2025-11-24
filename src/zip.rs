@@ -1,10 +1,9 @@
 use crate::directory::Directory;
 use binrw::{
-    BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binread, binrw,
+    binread, binrw, BinRead, BinReaderExt, BinResult, BinWriterExt, Endian, Error,
 };
 use indexmap::IndexMap;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::marker::PhantomData;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 #[binrw]
 #[brw(repr(u32))]
@@ -91,7 +90,6 @@ where
         let mut header = T1::default();
         let mut files_size = 0;
         let mut directors_size = 0;
-        let mut count = 0;
         for (_, director) in &mut self.directories.0 {
             director.offset_of_local_file_header = files_size as u32;
             let mut directory_writer = T1::default();
@@ -108,7 +106,6 @@ where
             data.seek(SeekFrom::Start(0))?;
             let file_data_length = std::io::copy(&mut data, writer)?;
             files_size += file_writer_length + file_data_length;
-            count += 1;
         }
         header.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut header, writer)?;

@@ -1,6 +1,6 @@
 use crate::file::{ExtraList, ZipFile};
 use crate::zip::{Magic, ZipModel};
-use binrw::{BinResult, BinWrite, Error, NullString, binread, binrw};
+use binrw::{BinResult, binrw};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Deref;
 use std::string::FromUtf8Error;
