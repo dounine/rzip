@@ -96,6 +96,24 @@ pub struct Directory<T: Read + Write + Seek + Default> {
 }
 
 impl<T: Read + Write + Seek + Default> Directory<T> {
+    pub fn decompressed(&mut self, writer: T) -> BinResult<()> {
+        self.data.seek(SeekFrom::Start(0))?;
+        if self.compressed {
+            let mut data = Vec::with_capacity(self.uncompressed_size as usize);
+            self.data.read_to_end(&mut data)?;
+            let un_compress_data =
+                miniz_oxide::inflate::decompress_to_vec(&data).map_err(|e| Error::Custom {
+                    pos: 0,
+                    err: Box::new(e),
+                })?;
+            let mut new_data = T::default();
+            self.uncompressed_size = un_compress_data.len() as u32;
+            new_data.write_all(&un_compress_data)?;
+            self.data = new_data;
+            self.compressed = false;
+        }
+        Ok(())
+    }
     pub fn compress(
         &mut self,
         crc32_computer: bool,
