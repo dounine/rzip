@@ -1,9 +1,11 @@
 use crate::file::{ExtraList, ZipFile};
+use crate::util::stream_length;
 use crate::zip::{Magic, ZipModel};
 use binrw::{BinResult, Error, binrw};
-use std::io::{Read, Seek, SeekFrom, Write};
+use crc32fast::hash;
+use miniz_oxide::deflate::CompressionLevel;
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::string::FromUtf8Error;
-use crate::util::stream_length;
 
 #[binrw]
 #[brw(repr(u16))]
@@ -51,8 +53,6 @@ impl TryInto<String> for Name {
 #[brw(little, import(model:ZipModel,))]
 #[derive(Debug, Clone)]
 pub struct Directory<T: Read + Write + Seek + Default> {
-    #[brw(ignore)]
-    pub compressed: bool,
     #[bw(calc = Magic::Directory)]
     _magic: Magic,
     pub created_zip_spec: u8,
@@ -61,6 +61,9 @@ pub struct Directory<T: Read + Write + Seek + Default> {
     pub extract_os: u8,
     pub flags: u16,
     pub compression_method: CompressionMethod,
+    #[br(calc = compression_method == CompressionMethod::Deflate)]
+    #[bw(ignore)]
+    pub compressed: bool,
     pub last_modification_time: u16,
     pub last_modification_date: u16,
     pub crc_32_uncompressed_data: u32,
@@ -91,7 +94,52 @@ pub struct Directory<T: Read + Write + Seek + Default> {
     #[bw(ignore)]
     pub data: T,
 }
+
 impl<T: Read + Write + Seek + Default> Directory<T> {
+    pub fn compress(
+        &mut self,
+        crc32_computer: bool,
+        compression_level: &CompressionLevel,
+        callback_fun: &mut impl FnMut(usize),
+    ) -> BinResult<()> {
+        if !self.compressed && self.compression_method == CompressionMethod::Deflate {
+            let mut data = Cursor::new(Vec::with_capacity(self.compressed_size as usize));
+            let crc_32_uncompressed_data = if crc32_computer {
+                let mut hasher = crc32fast::Hasher::new();
+                self.data.seek(SeekFrom::Start(0))?;
+                loop {
+                    let mut bytes = vec![0_u8; 1024 * 1024];
+                    let size = self.data.read(&mut bytes)?;
+                    let slice = &bytes[..size];
+                    data.write_all(slice)?;
+                    hasher.update(slice);
+                    if size == 0 {
+                        break;
+                    }
+                }
+                hasher.finalize()
+            } else {
+                self.data.seek(SeekFrom::Start(0))?;
+                std::io::copy(&mut self.data, &mut data)?;
+                0
+            };
+            self.crc_32_uncompressed_data = crc_32_uncompressed_data; //crc32 设置为0也能安装，网页可以忽略计算加快速度
+            self.file.crc_32_uncompressed_data = crc_32_uncompressed_data;
+            let data = data.into_inner();
+            let writer = &mut self.data;
+            miniz_oxide::deflate::stream::compress_stream_callback(
+                &data,
+                writer,
+                compression_level,
+                callback_fun,
+            )
+            .map_err(|e| Error::Custom {
+                pos: 0,
+                err: Box::new(e),
+            })?;
+        }
+        Ok(())
+    }
     pub fn put_data(&mut self, mut stream: T) -> BinResult<()> {
         let length = stream_length(&mut stream)? as u32;
         self.compressed_size = length;

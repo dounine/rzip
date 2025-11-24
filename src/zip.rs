@@ -1,14 +1,15 @@
 use crate::directory::{CompressionMethod, Directory, Name};
 use crate::extra::Extra;
 use crate::file::ZipFile;
+use crate::util::stream_length;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWriterExt, Endian, Error, binread, binrw};
 use indexmap::IndexMap;
+use miniz_oxide::deflate::CompressionLevel;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
-use crate::util::stream_length;
 
 #[binrw]
-#[brw(repr(u32))]
+#[brw(repr(u8))]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ZipModel {
     Parse,
@@ -50,7 +51,6 @@ pub struct FastZip<T: Read + Write + Seek + Default> {
 pub struct IndexDirectory<T>(IndexMap<Vec<u8>, Directory<T>>)
 where
     T: Read + Write + Seek + Default;
-
 
 impl<T> DerefMut for IndexDirectory<T>
 where
@@ -195,11 +195,55 @@ where
             .insert(directory.file_name.inner.clone(), directory);
         Ok(())
     }
-    pub fn package<W: Write + Seek>(&mut self, writer: &mut W) -> BinResult<()> {
+    fn create_adapter<F: FnMut(usize, usize, String)>(
+        total: usize,
+        sum: &mut usize,
+        mut f: F,
+    ) -> impl FnMut(usize) {
+        move |x| {
+            *sum += x;
+            f(
+                total,
+                *sum,
+                format!("{:.2}%", (*sum as f64 / total as f64) * 100.0),
+            )
+        }
+    }
+    fn computer_un_compress_size(&mut self) -> BinResult<usize> {
+        let mut total_size = 0;
+        for (_, director) in &mut self.directories.0 {
+            total_size += if !director.compressed
+                && director.compression_method == CompressionMethod::Deflate
+            {
+                stream_length(&mut director.data)?
+            } else {
+                0
+            }
+        }
+        Ok(total_size as usize)
+    }
+    pub fn package<W: Write + Seek>(
+        &mut self,
+        writer: &mut W,
+        compression_level: CompressionLevel,
+    ) -> BinResult<()> {
+        self.package_with_callback(writer, compression_level, &mut |_total, _size, _format| {})
+    }
+    pub fn package_with_callback<W: Write + Seek>(
+        &mut self,
+        writer: &mut W,
+        compression_level: CompressionLevel,
+        callback: &mut impl FnMut(usize, usize, String),
+    ) -> BinResult<()> {
         let mut header = T1::default();
         let mut files_size = 0;
         let mut directors_size = 0;
+        let mut binding = 0;
+        let total_size = self.computer_un_compress_size()?;
+        let mut callback = Self::create_adapter(total_size, &mut binding, callback);
         for (_, director) in &mut self.directories.0 {
+            director.compress(true, &compression_level, &mut callback)?;
+
             director.offset_of_local_file_header = files_size as u32;
             let mut directory_writer = T1::default();
             directory_writer.write_le_args(director, (ZipModel::Package,))?;
@@ -208,10 +252,11 @@ where
 
             let mut file_writer = T1::default();
             let file = &director.file;
-            let mut data = &mut director.data;
             file_writer.write_le(&file)?;
             file_writer.seek(SeekFrom::Start(0))?;
             let file_writer_length = std::io::copy(&mut file_writer, writer)?;
+
+            let mut data = &mut director.data;
             data.seek(SeekFrom::Start(0))?;
             let file_data_length = std::io::copy(&mut data, writer)?;
             files_size += file_writer_length + file_data_length;
@@ -239,7 +284,6 @@ where
         Ok(())
     }
 }
-
 
 #[binrw::parser(reader, endian)]
 pub fn parse_eocd_offset() -> BinResult<u64> {

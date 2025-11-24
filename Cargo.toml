@@ -10,6 +10,7 @@ members = ["example", "."]
 
 [dependencies]
 binrw = "0.15.0"
+crc32fast = "1.5.0"
 indexmap = "2.12.1"
 [dependencies.miniz_oxide]
 git = "https://github.com/dounine/miniz_oxide"

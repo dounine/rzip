@@ -1,4 +1,5 @@
 use binrw::{BinRead, BinWrite};
+use fast_zip::CompressionLevel;
 use fast_zip::zip::FastZip;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -54,9 +55,15 @@ fn main() {
     // let mut cursor = Cursor::new(data);
     // let dd = cursor.get_mut();
     let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
-    let mut writer= Cursor::new(vec![]);
+    let mut writer = Cursor::new(vec![]);
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
-    zip_file.package(&mut writer).unwrap();
+    zip_file
+        .package(
+            &mut writer,
+            CompressionLevel::DefaultLevel,
+            // &mut |total, size, format| println!("write {}", format),
+        )
+        .unwrap();
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
