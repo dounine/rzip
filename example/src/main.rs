@@ -63,6 +63,7 @@ fn main() {
             "hello/nihao.txt",
         )
         .unwrap();
+    zip_file.disable_crc32_computer();
     zip_file
         .package(
             &mut writer,

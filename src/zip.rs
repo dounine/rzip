@@ -30,6 +30,9 @@ pub enum Magic {
 #[br(little, magic = 0x04034b50_u32, import(model:ZipModel))]
 #[derive(Debug, Clone)]
 pub struct FastZip<T: Read + Write + Seek + Default> {
+    #[br(calc = true)]
+    #[bw(ignore)]
+    crc32_computer: bool,
     #[br(parse_with = parse_eocd_offset)]
     pub eocd_offset: u64,
     #[br(seek_before = SeekFrom::End(-(eocd_offset as i64)))]
@@ -90,7 +93,17 @@ where
         Ok(IndexDirectory(directories))
     }
 }
-
+impl<T> FastZip<T>
+where
+    T: Read + Write + Seek + Default,
+{
+    pub fn enable_crc32_computer(&mut self) {
+        self.crc32_computer = true;
+    }
+    pub fn disable_crc32_computer(&mut self) {
+        self.crc32_computer = false;
+    }
+}
 impl<D> FastZip<D>
 where
     D: Read + Write + Seek + Default,
@@ -241,9 +254,9 @@ where
         let mut binding = 0;
         let total_size = self.computer_un_compress_size()?;
         let mut callback = Self::create_adapter(total_size, &mut binding, callback);
+        let crc32_computer = self.crc32_computer;
         for (_, director) in &mut self.directories.0 {
-            let dd = director.file_name.inner == b"hello/nihao.txt";
-            director.compress(true, &compression_level, &mut callback)?;
+            director.compress(crc32_computer, &compression_level, &mut callback)?;
 
             director.offset_of_local_file_header = files_size as u32;
             let mut directory_writer = D::default();
