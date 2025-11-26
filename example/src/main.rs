@@ -10,6 +10,14 @@ pub enum MyData {
     File(File),
     Mem(Cursor<Vec<u8>>),
 }
+impl Clone for MyData {
+    fn clone(&self) -> Self {
+        match self {
+            MyData::File(f) => MyData::File(f.try_clone().unwrap()),
+            MyData::Mem(v) => MyData::Mem(Cursor::new(v.get_ref().clone())),
+        }
+    }
+}
 impl Default for MyData {
     fn default() -> Self {
         Self::Mem(Cursor::new(vec![]))
@@ -57,13 +65,26 @@ fn main() {
     let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
     let mut writer = Cursor::new(vec![]);
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
-    zip_file
-        .add_file(
-            MyData::Mem(Cursor::new(b"hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao".into())),
-            "hello/nihao.txt",
-        )
-        .unwrap();
-    zip_file.disable_crc32_computer();
+    // zip_file
+    //     .add_file(
+    //         MyData::Mem(Cursor::new(b"hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao".into())),
+    //         "hello/nihao.txt",
+    //     )
+    //     .unwrap();
+    // zip_file.disable_crc32_computer();
+    // let mut file = OpenOptions::new()
+    //     .write(true)
+    //     .create(true)
+    //     .truncate(true)
+    //     .open("./data/hello2.zip".to_string())
+    //     .unwrap();
+    // data.set_position(0);
+    // std::io::copy(&mut data, &mut file).unwrap();
+    // data.set_position(0);
+    let mut data = Cursor::new(vec![]);
+    zip_file.to_bin(&mut data).unwrap();
+    let mut zip_file: FastZip<MyData> = FastZip::from_bin(&mut data).unwrap();
+    // let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
     zip_file
         .package(
             &mut writer,

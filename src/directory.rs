@@ -1,9 +1,9 @@
 use crate::file::{ExtraList, ZipFile};
 use crate::util::stream_length;
-use crate::zip::{Magic, ZipModel};
-use binrw::{BinResult, Error, binrw};
-use crc32fast::hash;
+use crate::zip::{ZipModel};
+use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
 use miniz_oxide::deflate::CompressionLevel;
+use std::fmt::Debug;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::string::FromUtf8Error;
 
@@ -48,22 +48,60 @@ impl TryInto<String> for Name {
         String::from_utf8(self.inner)
     }
 }
-
-#[binrw]
-#[brw(little, import(model:ZipModel,))]
 #[derive(Debug, Clone)]
-pub struct Directory<T: Read + Write + Seek + Default> {
-    #[bw(calc = Magic::Directory)]
-    _magic: Magic,
+pub struct Bool {
+    pub value: bool,
+}
+impl Default for Bool {
+    fn default() -> Self {
+        Bool { value: true }
+    }
+}
+impl BinWrite for Bool {
+    type Args<'a> = ();
+
+    fn write_options<W: Write + Seek>(
+        &self,
+        writer: &mut W,
+        _endian: Endian,
+        _args: Self::Args<'_>,
+    ) -> BinResult<()> {
+        writer.write_all(&[self.value as u8])?;
+        Ok(())
+    }
+}
+impl BinRead for Bool {
+    type Args<'a> = ();
+
+    fn read_options<R: Read + Seek>(
+        reader: &mut R,
+        endian: Endian,
+        _args: Self::Args<'_>,
+    ) -> BinResult<Self> {
+        let value: u8 = reader.read_type_args(endian, ())?;
+        Ok(Bool { value: value != 0 })
+    }
+}
+impl From<bool> for Bool {
+    fn from(value: bool) -> Self {
+        Bool { value }
+    }
+}
+#[binrw]
+#[brw(little,magic = 0x02014b50_u32, import(model:ZipModel,))]
+#[derive(Debug, Clone)]
+pub struct Directory<T: Read + Write + Seek + Clone + Default> {
+    // #[bw(calc = Magic::Directory)]
+    // _magic: Magic,
     pub created_zip_spec: u8,
     pub created_os: u8,
     pub extract_zip_spec: u8,
     pub extract_os: u8,
     pub flags: u16,
     pub compression_method: CompressionMethod,
-    #[br(calc = compression_method == CompressionMethod::Deflate)]
+    #[br(calc = (compression_method == CompressionMethod::Deflate).into())]
     #[bw(ignore)]
-    pub compressed: bool,
+    pub compressed: Bool,
     pub last_modification_time: u16,
     pub last_modification_date: u16,
     pub crc_32_uncompressed_data: u32,
@@ -85,20 +123,112 @@ pub struct Directory<T: Read + Write + Seek + Default> {
     pub extra_fields: ExtraList,
     #[br(count=file_comment_length)]
     pub file_comment: Vec<u8>,
-    #[br(restore_position,seek_before = SeekFrom::Start(offset_of_local_file_header as u64), args(compressed_size,uncompressed_size,crc_32_uncompressed_data,)
+    #[br(parse_with = zip_file_parse,
+        args(
+            model.clone(),
+            offset_of_local_file_header,
+            compressed_size,
+            uncompressed_size,
+            crc_32_uncompressed_data,
+        )
     )]
-    #[bw(if(model != ZipModel::Package))]
+    #[bw(write_with = zip_file_writer,
+        args(
+            model.clone(),
+            *compressed_size,
+            *uncompressed_size,
+            *crc_32_uncompressed_data,
+        )
+    )]
     pub file: ZipFile,
-    #[br(restore_position,seek_before = SeekFrom::Start(file.data_position), parse_with = data_init,args(T::default(),file.compressed_size,)
-    )]
-    #[bw(ignore)]
+    #[br(parse_with = data_parse,args(T::default(),model.clone(),file.data_position,file.compressed_size,))]
+    #[bw(write_with = data_write,args(model.clone(),))]
     pub data: T,
 }
 
-impl<T: Read + Write + Seek + Default> Directory<T> {
-    pub fn decompressed(&mut self, writer: T) -> BinResult<()> {
+#[binrw::parser(reader)]
+pub fn data_parse<T: Write + Seek + Default>(
+    mut data: T,
+    model: ZipModel,
+    data_position: u64,
+    compressed_size: u32,
+) -> BinResult<T> {
+    let pos = reader.stream_position()?;
+    if model == ZipModel::Parse {
+        reader.seek(SeekFrom::Start(data_position))?;
+    }
+    let mut take_reader = reader.take(compressed_size as u64);
+    std::io::copy(&mut take_reader, &mut data)?;
+    data.seek(SeekFrom::Start(0))?;
+    if model == ZipModel::Parse {
+        reader.seek(SeekFrom::Start(pos))?;
+    }
+    Ok(data)
+}
+#[binrw::writer(writer, endian)]
+fn zip_file_writer(
+    value: &ZipFile,
+    model: ZipModel,
+    compressed_size: u32,
+    uncompressed_size: u32,
+    crc_32_uncompressed_data: u32,
+) -> BinResult<()> {
+    if model == ZipModel::Bin {
+        writer.write_type_args(
+            value,
+            endian,
+            (
+                model,
+                compressed_size,
+                uncompressed_size,
+                crc_32_uncompressed_data,
+            ),
+        )?;
+    }
+    Ok(())
+}
+#[binrw::parser(reader, endian)]
+fn zip_file_parse(
+    model: ZipModel,
+    offset_of_local_file_header: u32,
+    compressed_size: u32,
+    uncompressed_size: u32,
+    crc_32_uncompressed_data: u32,
+) -> BinResult<ZipFile> {
+    let pos = reader.stream_position()?;
+    if model == ZipModel::Parse {
+        reader.seek(SeekFrom::Start(offset_of_local_file_header as u64))?;
+    }
+    let value = reader.read_type_args(
+        endian,
+        (
+            model.clone(),
+            compressed_size,
+            uncompressed_size,
+            crc_32_uncompressed_data,
+        ),
+    )?;
+    if model == ZipModel::Parse {
+        reader.seek(SeekFrom::Start(pos))?;
+    }
+    Ok(value)
+}
+#[binrw::writer(writer)]
+fn data_write<T>(value: &T, model: ZipModel) -> BinResult<()>
+where
+    T: Read + Write + Seek + Clone + Default,
+{
+    if model == ZipModel::Bin {
+        let mut value = value.clone();
+        value.seek(SeekFrom::Start(0))?;
+        std::io::copy(&mut value, writer)?;
+    }
+    Ok(())
+}
+impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
+    pub fn decompressed(&mut self) -> BinResult<()> {
         self.data.seek(SeekFrom::Start(0))?;
-        if self.compressed {
+        if self.compressed.value {
             let mut data = Vec::with_capacity(self.uncompressed_size as usize);
             self.data.read_to_end(&mut data)?;
             let un_compress_data =
@@ -110,7 +240,7 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
             self.uncompressed_size = un_compress_data.len() as u32;
             new_data.write_all(&un_compress_data)?;
             self.data = new_data;
-            self.compressed = false;
+            self.compressed = false.into();
         }
         Ok(())
     }
@@ -120,7 +250,7 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
         compression_level: &CompressionLevel,
         callback_fun: &mut impl FnMut(usize),
     ) -> BinResult<()> {
-        if !self.compressed && self.compression_method == CompressionMethod::Deflate {
+        if !self.compressed.value && self.compression_method == CompressionMethod::Deflate {
             let mut data = Cursor::new(Vec::with_capacity(self.uncompressed_size as usize));
             let crc_32_uncompressed_data = if crc32_computer {
                 let mut hasher = crc32fast::Hasher::new();
@@ -167,15 +297,8 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
         self.uncompressed_size = length;
         self.file.compressed_size = self.compressed_size;
         self.file.uncompressed_size = self.uncompressed_size;
-        self.compressed = false;
+        self.compressed = false.into();
         self.data = stream;
         Ok(())
     }
-}
-#[binrw::parser(reader)]
-pub fn data_init<T: Write + Seek + Default>(mut data: T, compressed_size: u32) -> BinResult<T> {
-    let mut take_reader = reader.take(compressed_size as u64);
-    std::io::copy(&mut take_reader, &mut data)?;
-    data.seek(SeekFrom::Start(0))?;
-    Ok(data)
 }

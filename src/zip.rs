@@ -1,8 +1,11 @@
-use crate::directory::{CompressionMethod, Directory, Name};
+use alloc::alloc;
+use crate::directory::{Bool, CompressionMethod, Directory, Name};
 use crate::extra::Extra;
 use crate::file::ZipFile;
 use crate::util::stream_length;
-use binrw::{BinRead, BinReaderExt, BinResult, BinWriterExt, Endian, Error, binread, binrw};
+use binrw::{
+    BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw,
+};
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -25,39 +28,553 @@ pub enum Magic {
     Directory = 0x02014b50,
     File = 0x04034b50,
 }
+impl Default for Magic {
+    fn default() -> Self {
+        Self::EoCd
+    }
+}
 
-#[binread]
-#[br(little, magic = 0x04034b50_u32, import(model:ZipModel))]
+#[binrw]
+#[brw(little, magic = 0x04034b50_u32, import(model:ZipModel))]
 #[derive(Debug, Clone)]
-pub struct FastZip<T: Read + Write + Seek + Default> {
-    #[br(calc = true)]
+pub struct FastZip<T: Read + Write + Seek + Clone + Default> {
+    #[brw(if(model == ZipModel::Bin))]
+    crc32_computer: Bool,
+    #[br(parse_with = parse_eocd_offset,args(model.clone(),))]
     #[bw(ignore)]
-    crc32_computer: bool,
-    #[br(parse_with = parse_eocd_offset)]
     pub eocd_offset: u64,
-    #[br(seek_before = SeekFrom::End(-(eocd_offset as i64)))]
+    #[br(if(model==ZipModel::Parse),seek_before = SeekFrom::End(-(eocd_offset as i64)))]
+    #[bw(if(model==ZipModel::Parse))]
     magic: Magic,
     pub number_of_disk: u16,
     pub directory_starts: u16,
     pub number_of_directory_disk: u16,
+    #[bw(calc = directories.len() as u16)]
     pub entries: u16,
     pub size: u32,
     pub offset: u32,
+    #[bw(calc = comment.len() as u16)]
     pub comment_length: u16,
     #[br(count = comment_length)]
     pub comment: Vec<u8>,
-    #[br(seek_before = SeekFrom::Start(offset as u64),args(model, entries,))]
+    #[br(seek_before = if model == ZipModel::Parse {
+            SeekFrom::Start(offset as u64)
+        } else {
+            SeekFrom::Current(0)
+        },args(model.clone(), entries,)
+    )]
+    #[bw(if(model == ZipModel::Bin),args(model.clone(),))]
     pub directories: IndexDirectory<T>,
 }
-
+// impl<T: Read + Write + Seek + Clone + Default> binrw::BinRead for FastZip<T> {
+//     type Args<'__binrw_generated_args_lifetime> = (ZipModel,);
+//     fn read_options<R: binrw::io::Read + binrw::io::Seek>(
+//         __binrw_generated_var_reader: &mut R,
+//         __binrw_generated_var_endian: binrw::Endian,
+//         __binrw_generated_var_arguments: Self::Args<'_>,
+//     ) -> binrw::BinResult<Self> {
+//         let __binrw_generated_var_reader = __binrw_generated_var_reader;
+//         let __binrw_generated_position_temp = binrw::io::Seek::stream_position(
+//             __binrw_generated_var_reader,
+//         )?;
+//         (|| {
+//             let (mut model,) = __binrw_generated_var_arguments;
+//             let __binrw_generated_var_endian = binrw::Endian::Little;
+//             binrw::__private::magic(
+//                 __binrw_generated_var_reader,
+//                 0x04034b50_u32,
+//                 __binrw_generated_var_endian,
+//             )?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut crc32_computer: Bool = if model == ZipModel::Bin {
+//                 __binrw_generated_read_function(
+//                     __binrw_generated_var_reader,
+//                     __binrw_generated_var_endian,
+//                     <_ as binrw::__private::Required>::args(),
+//                 )
+//                     .map_err(|err| binrw::error::ContextExt::with_context(
+//                         err,
+//                         binrw::error::BacktraceFrame::Full {
+//                             message: "While parsing field 'crc32_computer' in FastZip"
+//                                 .into(),
+//                             line: 41u32,
+//                             file: "src/zip.rs",
+//                             code: None,
+//                         },
+//                     ))?
+//             } else {
+//                 <_>::default()
+//             };
+//             let __binrw_generated_read_function = binrw::__private::parse_fn_type_hint(
+//                 parse_eocd_offset,
+//             );
+//             let __binrw_generated_args_eocd_offset = binrw::__private::parse_function_args_type_hint::<
+//                 _,
+//                 u64,
+//                 _,
+//                 _,
+//             >(&__binrw_generated_read_function, (model.clone(),));
+//             let mut eocd_offset: u64 = (|| {
+//                 __binrw_generated_read_function
+//             })()(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 __binrw_generated_args_eocd_offset,
+//             )
+//                 .map(|v| -> u64 { v })
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'eocd_offset' in FastZip"
+//                             .into(),
+//                         line: 44u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut magic: Magic = if model == ZipModel::Parse {
+//                 {
+//                     binrw::io::Seek::seek(
+//                         __binrw_generated_var_reader,
+//                         SeekFrom::End(-(eocd_offset as i64)),
+//                     )?;
+//                     let __binrw_temp = __binrw_generated_read_function(
+//                         __binrw_generated_var_reader,
+//                         __binrw_generated_var_endian,
+//                         <_ as binrw::__private::Required>::args(),
+//                     )
+//                         .map_err(|err| binrw::error::ContextExt::with_context(
+//                             err,
+//                             binrw::error::BacktraceFrame::Full {
+//                                 message: "While parsing field 'magic' in FastZip".into(),
+//                                 line: 46u32,
+//                                 file: "src/zip.rs",
+//                                 code: None,
+//                             },
+//                         ))?;
+//                     __binrw_temp
+//                 }
+//             } else {
+//                 <_>::default()
+//             };
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut number_of_disk: u16 = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 <_ as binrw::__private::Required>::args(),
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'number_of_disk' in FastZip"
+//                             .into(),
+//                         line: 47u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut directory_starts: u16 = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 <_ as binrw::__private::Required>::args(),
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'directory_starts' in FastZip"
+//                             .into(),
+//                         line: 48u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut number_of_directory_disk: u16 = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 <_ as binrw::__private::Required>::args(),
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'number_of_directory_disk' in FastZip"
+//                             .into(),
+//                         line: 49u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut entries: u16 = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 <_ as binrw::__private::Required>::args(),
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'entries' in FastZip".into(),
+//                         line: 51u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut size: u32 = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 <_ as binrw::__private::Required>::args(),
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'size' in FastZip".into(),
+//                         line: 52u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut offset: u32 = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 <_ as binrw::__private::Required>::args(),
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'offset' in FastZip".into(),
+//                         line: 53u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let mut comment_length: u16 = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 <_ as binrw::__private::Required>::args(),
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'comment_length' in FastZip"
+//                             .into(),
+//                         line: 55u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let __binrw_generated_args_comment: <Vec<
+//                 u8,
+//             > as binrw::BinRead>::Args<'_> = {
+//                 let args_ty = ::core::marker::PhantomData::<_>;
+//                 if false {
+//                     ::binrw::__private::passthrough_helper(args_ty)
+//                 } else {
+//                     let builder = ::binrw::__private::builder_helper(args_ty);
+//                     let builder = builder
+//                         .count({
+//                             let __binrw_temp = comment_length;
+//                             #[allow(
+//                                 clippy::useless_conversion,
+//                                 clippy::unnecessary_fallible_conversions
+//                             )]
+//                             usize::try_from(__binrw_temp)
+//                                 .map_err(|_| {
+//                                     extern crate alloc;
+//                                     binrw::Error::AssertFail {
+//                                         pos: binrw::io::Seek::stream_position(
+//                                             __binrw_generated_var_reader,
+//                                         )
+//                                             .unwrap_or_default(),
+//                                         message:"aa".to_string()
+//                                     }
+//                                 })?
+//                         });
+//                     builder.finalize()
+//                 }
+//             };
+//             let mut comment: Vec<u8> = __binrw_generated_read_function(
+//                 __binrw_generated_var_reader,
+//                 __binrw_generated_var_endian,
+//                 __binrw_generated_args_comment,
+//             )
+//                 .map_err(|err| binrw::error::ContextExt::with_context(
+//                     err,
+//                     binrw::error::BacktraceFrame::Full {
+//                         message: "While parsing field 'comment' in FastZip".into(),
+//                         line: 57u32,
+//                         file: "src/zip.rs",
+//                         code: None,
+//                     },
+//                 ))?;
+//             let __binrw_generated_read_function = binrw::BinRead::read_options;
+//             let __binrw_generated_args_directories: <IndexDirectory<
+//                 T,
+//             > as binrw::BinRead>::Args<'_> = (model.clone(), entries);
+//             let mut directories: IndexDirectory<T> = {
+//                 binrw::io::Seek::seek(
+//                     __binrw_generated_var_reader,
+//                     if model == ZipModel::Parse {
+//                         SeekFrom::Start(offset as u64)
+//                     } else {
+//                         SeekFrom::Current(0)
+//                     },
+//                 )?;
+//                 let __binrw_temp = __binrw_generated_read_function(
+//                     __binrw_generated_var_reader,
+//                     __binrw_generated_var_endian,
+//                     __binrw_generated_args_directories,
+//                 )
+//                     .map_err(|err| binrw::error::ContextExt::with_context(
+//                         err,
+//                         binrw::error::BacktraceFrame::Full {
+//                             message: "While parsing field 'directories' in FastZip"
+//                                 .into(),
+//                             line: 65u32,
+//                             file: "src/zip.rs",
+//                             code: None,
+//                         },
+//                     ))?;
+//                 __binrw_temp
+//             };
+//             let __binrw_this = Self {
+//                 crc32_computer,
+//                 eocd_offset,
+//                 magic,
+//                 number_of_disk,
+//                 directory_starts,
+//                 number_of_directory_disk,
+//                 entries,
+//                 size,
+//                 offset,
+//                 comment_length,
+//                 comment,
+//                 directories,
+//             };
+//             Ok(__binrw_this)
+//         })()
+//             .map_err(
+//                 binrw::__private::restore_position::<
+//                     binrw::Error,
+//                     _,
+//                 >(__binrw_generated_var_reader, __binrw_generated_position_temp),
+//             )
+//     }
+// }
+// impl<T: Read + Write + Seek + Clone + Default> binrw::meta::ReadMagic
+// for FastZip<T> {
+//     type MagicType = u32;
+//     const MAGIC: Self::MagicType = 0x04034b50_u32;
+// }
+//
+// impl<T: Read + Write + Seek + Clone + Default> binrw::BinWrite for FastZip<T> {
+//     type Args<'__binrw_generated_args_lifetime> = (ZipModel,);
+//     fn write_options<W: binrw::io::Write + binrw::io::Seek>(
+//         &self,
+//         __binrw_generated_var_writer: &mut W,
+//         __binrw_generated_var_endian: binrw::Endian,
+//         __binrw_generated_var_arguments: Self::Args<'_>,
+//     ) -> binrw::BinResult<()> {
+//         let __binrw_generated_var_writer = __binrw_generated_var_writer;
+//         let __binrw_generated_position_temp = binrw::io::Seek::stream_position(
+//             __binrw_generated_var_writer,
+//         )?;
+//         let (mut model,) = __binrw_generated_var_arguments;
+//         let __binrw_this = self;
+//         let FastZip {
+//             crc32_computer,
+//             eocd_offset,
+//             magic,
+//             number_of_disk,
+//             directory_starts,
+//             number_of_directory_disk,
+//             entries, size,
+//             offset,
+//             comment_length, comment,
+//             directories,
+//         } = self;
+//         let __binrw_generated_var_endian = binrw::Endian::Little;
+//         binrw::BinWrite::write_options(
+//             &0x04034b50_u32,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             (),
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             Bool,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_crc32_computer: <Bool as binrw::BinWrite>::Args<
+//             '_,
+//         > = <_ as binrw::__private::Required>::args();
+//         if model == ZipModel::Bin {
+//             __binrw_generated_write_function(
+//                 &crc32_computer,
+//                 __binrw_generated_var_writer,
+//                 __binrw_generated_var_endian,
+//                 __binrw_generated_args_crc32_computer,
+//             )?;
+//         }
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             Magic,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_magic: <Magic as binrw::BinWrite>::Args<'_> = <_ as binrw::__private::Required>::args();
+//         __binrw_generated_write_function(
+//             &magic,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_magic,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             u16,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_number_of_disk: <u16 as binrw::BinWrite>::Args<
+//             '_,
+//         > = <_ as binrw::__private::Required>::args();
+//         __binrw_generated_write_function(
+//             &number_of_disk,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_number_of_disk,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             u16,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_directory_starts: <u16 as binrw::BinWrite>::Args<
+//             '_,
+//         > = <_ as binrw::__private::Required>::args();
+//         __binrw_generated_write_function(
+//             &directory_starts,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_directory_starts,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             u16,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_number_of_directory_disk: <u16 as binrw::BinWrite>::Args<
+//             '_,
+//         > = <_ as binrw::__private::Required>::args();
+//         __binrw_generated_write_function(
+//             &number_of_directory_disk,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_number_of_directory_disk,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             u16,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_entries = ();
+//         let entries: u16 = directories.len() as u16;
+//         __binrw_generated_write_function(
+//             &entries,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_entries,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             u32,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_size: <u32 as binrw::BinWrite>::Args<'_> = <_ as binrw::__private::Required>::args();
+//         __binrw_generated_write_function(
+//             &size,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_size,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             u32,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_offset: <u32 as binrw::BinWrite>::Args<'_> = <_ as binrw::__private::Required>::args();
+//         __binrw_generated_write_function(
+//             &offset,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_offset,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             u16,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_comment_length = ();
+//         let comment_length: u16 = comment.len() as u16;
+//         __binrw_generated_write_function(
+//             &comment_length,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_comment_length,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             Vec<u8>,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_comment: <Vec<u8> as binrw::BinWrite>::Args<'_> = <_ as binrw::__private::Required>::args();
+//         __binrw_generated_write_function(
+//             &comment,
+//             __binrw_generated_var_writer,
+//             __binrw_generated_var_endian,
+//             __binrw_generated_args_comment,
+//         )?;
+//         let __binrw_generated_write_function = binrw::__private::write_fn_type_hint::<
+//             IndexDirectory<T>,
+//             _,
+//             _,
+//             _,
+//         >(binrw::BinWrite::write_options);
+//         let __binrw_generated_args_directories: <IndexDirectory<
+//             T,
+//         > as binrw::BinWrite>::Args<'_> = (model.clone(),);
+//         if model == ZipModel::Bin {
+//             __binrw_generated_write_function(
+//                 &directories,
+//                 __binrw_generated_var_writer,
+//                 __binrw_generated_var_endian,
+//                 __binrw_generated_args_directories,
+//             )?;
+//         }
+//         Ok(())
+//     }
+// }
 #[derive(Debug, Clone)]
 pub struct IndexDirectory<T>(IndexMap<Vec<u8>, Directory<T>>)
 where
-    T: Read + Write + Seek + Default;
+    T: Read + Write + Seek + Clone + Default;
 
 impl<T> DerefMut for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + Clone + Default,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -65,7 +582,7 @@ where
 }
 impl<T> Deref for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + Clone + Default,
 {
     type Target = IndexMap<Vec<u8>, Directory<T>>;
 
@@ -75,7 +592,7 @@ where
 }
 impl<T> BinRead for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + Clone + Default,
 {
     type Args<'a> = (ZipModel, u16);
 
@@ -93,20 +610,39 @@ where
         Ok(IndexDirectory(directories))
     }
 }
+impl<T> BinWrite for IndexDirectory<T>
+where
+    T: Read + Write + Seek + Clone + Default,
+{
+    type Args<'a> = (ZipModel,);
+
+    fn write_options<W: Write + Seek>(
+        &self,
+        writer: &mut W,
+        endian: Endian,
+        args: Self::Args<'_>,
+    ) -> BinResult<()> {
+        let (model,) = args;
+        for (_, v) in &self.0 {
+            v.write_options(writer, endian, (model.clone(),))?;
+        }
+        Ok(())
+    }
+}
 impl<T> FastZip<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + Clone + Default,
 {
     pub fn enable_crc32_computer(&mut self) {
-        self.crc32_computer = true;
+        self.crc32_computer = true.into();
     }
     pub fn disable_crc32_computer(&mut self) {
-        self.crc32_computer = false;
+        self.crc32_computer = false.into();
     }
 }
 impl<D> FastZip<D>
 where
-    D: Read + Write + Seek + Default,
+    D: Read + Write + Seek + Clone + Default,
 {
     pub fn parse<T: Read + Seek>(reader: &mut T) -> BinResult<FastZip<D>> {
         FastZip::read_le_args(reader, (ZipModel::Parse,))
@@ -155,7 +691,7 @@ where
             inner: file_name.as_bytes().to_vec(),
         };
         let directory = Directory {
-            compressed: false,
+            compressed: false.into(),
             data,
             created_zip_spec: 0x1E, //3.0
             created_os: 0x03,       //Uninx
@@ -225,7 +761,7 @@ where
     fn computer_un_compress_size(&mut self) -> BinResult<usize> {
         let mut total_size = 0;
         for (_, director) in &mut self.directories.0 {
-            total_size += if !director.compressed
+            total_size += if !director.compressed.value
                 && director.compression_method == CompressionMethod::Deflate
             {
                 stream_length(&mut director.data)?
@@ -234,6 +770,14 @@ where
             }
         }
         Ok(total_size as usize)
+    }
+    pub fn to_bin<T: Write + Seek>(&self, writer: &mut T) -> BinResult<()> {
+        self.write_le_args(writer, (ZipModel::Bin,))?;
+        Ok(())
+    }
+    pub fn from_bin<T: Read + Seek>(reader: &mut T) -> BinResult<Self> {
+        reader.seek(SeekFrom::Start(0))?;
+        reader.read_type_args(Endian::Little, (ZipModel::Bin,))
     }
     pub fn package<W: Write + Seek>(
         &mut self,
@@ -254,7 +798,7 @@ where
         let mut binding = 0;
         let total_size = self.computer_un_compress_size()?;
         let mut callback = Self::create_adapter(total_size, &mut binding, callback);
-        let crc32_computer = self.crc32_computer;
+        let crc32_computer = self.crc32_computer.value;
         for (_, director) in &mut self.directories.0 {
             director.compress(crc32_computer, &compression_level, &mut callback)?;
 
@@ -266,7 +810,15 @@ where
 
             let mut file_writer = D::default();
             let file = &director.file;
-            file_writer.write_le(&file)?;
+            file_writer.write_le_args(
+                &file,
+                (
+                    ZipModel::Package,
+                    director.compressed_size,
+                    director.uncompressed_size,
+                    director.crc_32_uncompressed_data,
+                ),
+            )?;
             file_writer.seek(SeekFrom::Start(0))?;
             let file_writer_length = std::io::copy(&mut file_writer, writer)?;
 
@@ -278,8 +830,8 @@ where
         header.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut header, writer)?;
         self.size = directors_size as u32;
-        self.entries = self.directories.len() as u16;
-        self.number_of_directory_disk = self.entries;
+        // self.entries = self.directories.len() as u16;
+        self.number_of_directory_disk = self.directories.len() as u16;
         self.offset = files_size as u32;
         self.write_eocd(writer)?;
         writer.seek(SeekFrom::Start(0))?;
@@ -290,17 +842,20 @@ where
         writer.write_le(&self.number_of_disk)?;
         writer.write_le(&self.directory_starts)?;
         writer.write_le(&self.number_of_directory_disk)?;
-        writer.write_le(&self.entries)?;
+        writer.write_le(&(self.directories.len() as u16))?;
         writer.write_le(&self.size)?;
         writer.write_le(&self.offset)?;
-        writer.write_le(&self.comment_length)?;
+        writer.write_le(&(self.comment.len() as u16))?;
         writer.write_all(&self.comment)?;
         Ok(())
     }
 }
 
 #[binrw::parser(reader, endian)]
-pub fn parse_eocd_offset() -> BinResult<u64> {
+pub fn parse_eocd_offset(model: ZipModel) -> BinResult<u64> {
+    if model == ZipModel::Bin {
+        return Ok(0);
+    }
     let max_eocd_size: u64 = u16::MAX as u64 + 22;
     let mut search_size: u64 = 22; //最快的搜索
     let file_size = stream_length(reader)?;

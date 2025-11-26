@@ -1,10 +1,11 @@
 use crate::directory::{CompressionMethod, Name};
 use crate::extra::Extra;
+use crate::zip::ZipModel;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, binrw};
 use std::io::{Cursor, Read, Seek, Write};
 
 #[binrw]
-#[brw(little,magic=0x04034b50_u32,import(compressed_size2:u32,uncompressed_size:u32,crc_32_uncompressed_data:u32))]
+#[brw(little,magic=0x04034b50_u32,import(model:ZipModel,compressed_size:u32,uncompressed_size:u32,crc_32_uncompressed_data:u32))]
 #[derive(Debug, Clone)]
 pub struct ZipFile {
     #[bw(calc = if file_name.inner.last() == Some(&b'/') { 10 } else { 14 })]
@@ -35,15 +36,16 @@ pub struct ZipFile {
     pub file_name: Name,
     #[br(args(extra_field_length))]
     pub extra_fields: ExtraList,
-    // #[br(ignore)]
-    // #[bw(ignore)]
     // pub data_descriptor: Option<DataDescriptor>,
-    #[br(parse_with = stream_position)]
-    #[bw(ignore)]
+    #[br(parse_with = data_position_parse,args(model))]
+    #[bw(if(model == ZipModel::Bin))]
     pub data_position: u64,
 }
-#[binrw::parser(reader)]
-pub fn stream_position() -> BinResult<u64> {
+#[binrw::parser(reader, endian)]
+pub fn data_position_parse(model: ZipModel) -> BinResult<u64> {
+    if model == ZipModel::Bin {
+        return reader.read_type(endian);
+    }
     reader.stream_position().map_err(|e| binrw::Error::Custom {
         pos: 0,
         err: Box::new(e),
