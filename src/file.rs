@@ -37,13 +37,13 @@ pub struct ZipFile {
     #[br(args(extra_field_length))]
     pub extra_fields: ExtraList,
     // pub data_descriptor: Option<DataDescriptor>,
-    #[br(parse_with = data_position_parse,args(model))]
+    #[br(parse_with = data_position_parse,args(&model))]
     #[bw(if(model == ZipModel::Bin))]
     pub data_position: u64,
 }
 #[binrw::parser(reader, endian)]
-pub fn data_position_parse(model: ZipModel) -> BinResult<u64> {
-    if model == ZipModel::Bin {
+pub fn data_position_parse(model: &ZipModel) -> BinResult<u64> {
+    if *model == ZipModel::Bin {
         return reader.read_type(endian);
     }
     reader.stream_position().map_err(|e| binrw::Error::Custom {
@@ -99,7 +99,7 @@ impl BinWrite for ExtraList {
         &self,
         writer: &mut W,
         endian: Endian,
-        args: Self::Args<'_>,
+        _args: Self::Args<'_>,
     ) -> BinResult<()> {
         for extra in &self.0 {
             writer.write_type(extra, endian)?;
@@ -107,27 +107,3 @@ impl BinWrite for ExtraList {
         Ok(())
     }
 }
-// impl Deref for ExtraList {
-//     type Target = Vec<Extra>;
-//
-//     fn deref(&self) -> &Self::Target {
-//         &self.0
-//     }
-// }
-// const ZIP_FILE_HEADER_SIZE: usize = size_of::<Magic>()
-//     + size_of::<u16>() * 2
-//     + size_of::<CompressionMethod>()
-//     + size_of::<u16>() * 2
-//     + size_of::<u32>() * 3
-//     + size_of::<u16>() * 2;
-// #[derive(Debug, Clone)]
-// pub struct DataDescriptor {
-//     pub crc32: u32,
-//     pub compressed_size: u32,
-//     pub uncompressed_size: u32,
-// }
-// impl DataDescriptor {
-//     pub fn size() -> usize {
-//         4 * 4
-//     }
-// }

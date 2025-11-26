@@ -1,6 +1,6 @@
 use crate::file::{ExtraList, ZipFile};
 use crate::util::stream_length;
-use crate::zip::{ZipModel};
+use crate::zip::ZipModel;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
 use miniz_oxide::deflate::CompressionLevel;
 use std::fmt::Debug;
@@ -99,8 +99,8 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     pub extract_os: u8,
     pub flags: u16,
     pub compression_method: CompressionMethod,
-    #[br(calc = (compression_method == CompressionMethod::Deflate).into())]
-    #[bw(ignore)]
+    #[br(parse_with = compressed_parse,args(&model,&compression_method))]
+    #[bw(if(model == ZipModel::Bin))]
     pub compressed: Bool,
     pub last_modification_time: u16,
     pub last_modification_date: u16,
@@ -125,7 +125,7 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     pub file_comment: Vec<u8>,
     #[br(parse_with = zip_file_parse,
         args(
-            model.clone(),
+            &model,
             offset_of_local_file_header,
             compressed_size,
             uncompressed_size,
@@ -134,33 +134,39 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     )]
     #[bw(write_with = zip_file_writer,
         args(
-            model.clone(),
+            &model,
             *compressed_size,
             *uncompressed_size,
             *crc_32_uncompressed_data,
         )
     )]
     pub file: ZipFile,
-    #[br(parse_with = data_parse,args(T::default(),model.clone(),file.data_position,file.compressed_size,))]
-    #[bw(write_with = data_write,args(model.clone(),))]
+    #[br(parse_with = data_parse,args(T::default(),&model,file.data_position,file.compressed_size,))]
+    #[bw(write_with = data_write,args(&model,))]
     pub data: T,
 }
-
+#[binrw::parser(reader, endian)]
+fn compressed_parse(model: &ZipModel, compression_method: &CompressionMethod) -> BinResult<Bool> {
+    if *model == ZipModel::Bin {
+        return reader.read_type(endian);
+    }
+    Ok((*compression_method == CompressionMethod::Deflate).into())
+}
 #[binrw::parser(reader)]
 pub fn data_parse<T: Write + Seek + Default>(
     mut data: T,
-    model: ZipModel,
+    model: &ZipModel,
     data_position: u64,
     compressed_size: u32,
 ) -> BinResult<T> {
     let pos = reader.stream_position()?;
-    if model == ZipModel::Parse {
+    if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(data_position))?;
     }
     let mut take_reader = reader.take(compressed_size as u64);
     std::io::copy(&mut take_reader, &mut data)?;
     data.seek(SeekFrom::Start(0))?;
-    if model == ZipModel::Parse {
+    if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(pos))?;
     }
     Ok(data)
@@ -168,17 +174,17 @@ pub fn data_parse<T: Write + Seek + Default>(
 #[binrw::writer(writer, endian)]
 fn zip_file_writer(
     value: &ZipFile,
-    model: ZipModel,
+    model: &ZipModel,
     compressed_size: u32,
     uncompressed_size: u32,
     crc_32_uncompressed_data: u32,
 ) -> BinResult<()> {
-    if model == ZipModel::Bin {
+    if *model == ZipModel::Bin {
         writer.write_type_args(
             value,
             endian,
             (
-                model,
+                model.clone(),
                 compressed_size,
                 uncompressed_size,
                 crc_32_uncompressed_data,
@@ -189,14 +195,14 @@ fn zip_file_writer(
 }
 #[binrw::parser(reader, endian)]
 fn zip_file_parse(
-    model: ZipModel,
+    model: &ZipModel,
     offset_of_local_file_header: u32,
     compressed_size: u32,
     uncompressed_size: u32,
     crc_32_uncompressed_data: u32,
 ) -> BinResult<ZipFile> {
     let pos = reader.stream_position()?;
-    if model == ZipModel::Parse {
+    if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(offset_of_local_file_header as u64))?;
     }
     let value = reader.read_type_args(
@@ -208,17 +214,17 @@ fn zip_file_parse(
             crc_32_uncompressed_data,
         ),
     )?;
-    if model == ZipModel::Parse {
+    if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(pos))?;
     }
     Ok(value)
 }
 #[binrw::writer(writer)]
-fn data_write<T>(value: &T, model: ZipModel) -> BinResult<()>
+fn data_write<T>(value: &T, model: &ZipModel) -> BinResult<()>
 where
     T: Read + Write + Seek + Clone + Default,
 {
-    if model == ZipModel::Bin {
+    if *model == ZipModel::Bin {
         let mut value = value.clone();
         value.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut value, writer)?;
