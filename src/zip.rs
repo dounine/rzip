@@ -67,7 +67,7 @@ pub struct FastZip<T: Read + Write + Seek + Clone + Default> {
     pub directories: IndexDirectory<T>,
 }
 #[derive(Debug, Clone)]
-pub struct IndexDirectory<T>(IndexMap<Vec<u8>, Directory<T>>)
+pub struct IndexDirectory<T>(pub IndexMap<Vec<u8>, Directory<T>>)
 where
     T: Read + Write + Seek + Clone + Default;
 
