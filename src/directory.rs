@@ -3,7 +3,9 @@ use crate::util::stream_length;
 use crate::zip::ZipModel;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
 use miniz_oxide::deflate::CompressionLevel;
+use miniz_oxide::inflate::stream::decompress_stream_callback;
 use std::fmt::Debug;
+use std::io;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::string::FromUtf8Error;
 
@@ -88,7 +90,7 @@ impl From<bool> for Bool {
     }
 }
 #[binrw]
-#[brw(little,magic = 0x02014b50_u32, import(model:ZipModel,))]
+#[brw(little, magic = 0x02014b50_u32, import(model:ZipModel,))]
 #[derive(Debug, Clone)]
 pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     // #[bw(calc = Magic::Directory)]
@@ -141,7 +143,8 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
         )
     )]
     pub file: ZipFile,
-    #[br(parse_with = data_parse,args(T::default(),&model,file.data_position,file.compressed_size,))]
+    #[br(parse_with = data_parse,args(T::default(),&model,file.data_position,file.compressed_size,)
+    )]
     #[bw(write_with = data_write,args(&model,))]
     pub data: T,
 }
@@ -235,6 +238,24 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
     pub fn compressed(&self) -> bool {
         self.compressed.value
     }
+    pub fn decompressed_callback(&mut self, callback_fun: &mut impl FnMut(usize)) -> BinResult<()> {
+        self.data.seek(SeekFrom::Start(0))?;
+        if self.compressed() {
+            let mut data = vec![];
+            self.data.read_to_end(&mut data)?;
+            let mut new_data = T::default();
+            decompress_stream_callback(&data, &mut new_data, callback_fun).map_err(|e| {
+                Error::Custom {
+                    pos: 0,
+                    err: Box::new(e),
+                }
+            })?;
+            new_data.seek(SeekFrom::Start(0))?;
+            self.data = new_data;
+            self.compressed = false.into();
+        }
+        Ok(())
+    }
     pub fn decompressed(&mut self) -> BinResult<()> {
         self.data.seek(SeekFrom::Start(0))?;
         if self.compressed.value {
@@ -254,7 +275,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
         }
         Ok(())
     }
-    pub fn compress(
+    pub fn compress_callback(
         &mut self,
         crc32_computer: bool,
         compression_level: &CompressionLevel,
@@ -300,6 +321,14 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
             compress_data.seek(SeekFrom::Start(0))?;
             self.data = compress_data;
         }
+        Ok(())
+    }
+    pub fn compress(
+        &mut self,
+        crc32_computer: bool,
+        compression_level: &CompressionLevel,
+    ) -> BinResult<()> {
+        self.compress_callback(crc32_computer, compression_level, &mut |_| {})?;
         Ok(())
     }
     pub fn put_data(&mut self, mut stream: T) -> BinResult<()> {
