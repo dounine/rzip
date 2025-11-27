@@ -1,11 +1,9 @@
-use alloc::alloc;
 use crate::directory::{Bool, CompressionMethod, Directory, Name};
 use crate::extra::Extra;
 use crate::file::ZipFile;
 use crate::util::stream_length;
-use binrw::{
-    BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw,
-};
+use alloc::alloc;
+use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -67,7 +65,7 @@ pub struct FastZip<T: Read + Write + Seek + Clone + Default> {
     pub directories: IndexDirectory<T>,
 }
 #[derive(Debug, Clone)]
-pub struct IndexDirectory<T>(pub IndexMap<Vec<u8>, Directory<T>>)
+pub struct IndexDirectory<T>(pub IndexMap<String, Directory<T>>)
 where
     T: Read + Write + Seek + Clone + Default;
 
@@ -83,7 +81,7 @@ impl<T> Deref for IndexDirectory<T>
 where
     T: Read + Write + Seek + Clone + Default,
 {
-    type Target = IndexMap<Vec<u8>, Directory<T>>;
+    type Target = IndexMap<String, Directory<T>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -104,7 +102,12 @@ where
         let mut directories = IndexMap::new();
         for _ in 0..size {
             let dir: Directory<T> = reader.read_type_args(endian, (model.clone(),))?;
-            directories.insert(dir.file_name.inner.clone(), dir);
+            let name =
+                String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Custom {
+                    pos: 0,
+                    err: Box::new(e),
+                })?;
+            directories.insert(name, dir);
         }
         Ok(IndexDirectory(directories))
     }
@@ -146,10 +149,10 @@ where
     pub fn parse<T: Read + Seek>(reader: &mut T) -> BinResult<FastZip<D>> {
         FastZip::read_le_args(reader, (ZipModel::Parse,))
     }
-    pub fn remove_file(&mut self, file_name: &[u8]) {
+    pub fn remove_file(&mut self, file_name: &str) {
         self.directories.swap_remove(file_name);
     }
-    pub fn save_file(&mut self, data: D, file_name: &[u8]) -> BinResult<()> {
+    pub fn save_file(&mut self, data: D, file_name: &str) -> BinResult<()> {
         if let Some(dir) = self.directories.get_mut(file_name) {
             return dir.put_data(data);
         }
@@ -160,7 +163,11 @@ where
         if dir.file_name.inner != dir.file.file_name.inner {
             dir.file.file_name = dir.file_name.clone();
         }
-        self.directories.insert(dir.file_name.inner.clone(), dir);
+        let name = String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Custom {
+            pos: 0,
+            err: Box::new(e),
+        })?;
+        self.directories.insert(name, dir);
         Ok(())
     }
     fn is_binary(data: &[u8]) -> bool {
@@ -175,7 +182,7 @@ where
         let ratio = non_text_count as f32 / data.len() as f32;
         ratio > bin_threshold
     }
-    pub fn add_file(&mut self, mut data: D, file_name: &[u8]) -> BinResult<()> {
+    pub fn add_file(&mut self, mut data: D, file_name: &str) -> BinResult<()> {
         let length = stream_length(&mut data)?;
         let uncompressed_size = length as u32;
         let crc_32_uncompressed_data = 0; //data.crc32_value();
@@ -187,7 +194,7 @@ where
         let internal_file_attributes = if Self::is_binary(&buffer) { 0 } else { 1 };
 
         let file_name = Name {
-            inner: file_name.to_vec(),
+            inner: file_name.as_bytes().to_vec(),
         };
         let directory = Directory {
             compressed: false.into(),
@@ -239,8 +246,12 @@ where
                 data_position: 0,
             },
         };
-        self.directories
-            .insert(directory.file_name.inner.clone(), directory);
+        let name =
+            String::from_utf8(directory.file_name.inner.clone()).map_err(|e| Error::Custom {
+                pos: 0,
+                err: Box::new(e),
+            })?;
+        self.directories.insert(name, directory);
         Ok(())
     }
     fn create_adapter<F: FnMut(usize, usize, String)>(
