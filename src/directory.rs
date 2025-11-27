@@ -248,6 +248,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
             let mut new_data = T::default();
             self.uncompressed_size = un_compress_data.len() as u32;
             new_data.write_all(&un_compress_data)?;
+            new_data.seek(SeekFrom::Start(0))?;
             self.data = new_data;
             self.compressed = false.into();
         }
@@ -296,6 +297,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
             })?;
             self.compressed_size = stream_length(&mut compress_data)? as u32;
             self.file.compressed_size = self.compressed_size;
+            compress_data.seek(SeekFrom::Start(0))?;
             self.data = compress_data;
         }
         Ok(())
