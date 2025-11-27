@@ -277,6 +277,13 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
         }
         Ok(())
     }
+    pub fn copy_data(&mut self) -> BinResult<Vec<u8>> {
+        let pos = self.data.stream_position()?;
+        let mut data = vec![];
+        self.data.read_to_end(&mut data)?;
+        self.data.seek(SeekFrom::Start(pos))?;
+        Ok(data)
+    }
     pub fn sha_value(&mut self) -> BinResult<(Vec<u8>, Vec<u8>)> {
         let pos = self.data.stream_position()?;
         self.data.seek(SeekFrom::Start(0))?;
