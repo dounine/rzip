@@ -37,6 +37,13 @@ pub struct Name {
     #[br(count = count)]
     pub inner: Vec<u8>,
 }
+impl From<String> for Name {
+    fn from(value: String) -> Self {
+        Self {
+            inner: value.into_bytes(),
+        }
+    }
+}
 impl Name {
     pub fn into_string(self, pos: u64) -> BinResult<String> {
         self.clone().try_into().map_err(|e| Error::Custom {
