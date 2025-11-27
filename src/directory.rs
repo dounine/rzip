@@ -232,6 +232,9 @@ where
     Ok(())
 }
 impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
+    pub fn compressed(&self) -> bool {
+        self.compressed.value
+    }
     pub fn decompressed(&mut self) -> BinResult<()> {
         self.data.seek(SeekFrom::Start(0))?;
         if self.compressed.value {
