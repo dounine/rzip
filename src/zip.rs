@@ -146,11 +146,11 @@ where
     pub fn parse<T: Read + Seek>(reader: &mut T) -> BinResult<FastZip<D>> {
         FastZip::read_le_args(reader, (ZipModel::Parse,))
     }
-    pub fn remove_file(&mut self, file_name: &str) {
-        self.directories.swap_remove(file_name.as_bytes());
+    pub fn remove_file(&mut self, file_name: &[u8]) {
+        self.directories.swap_remove(file_name);
     }
-    pub fn save_file(&mut self, data: D, file_name: &str) -> BinResult<()> {
-        if let Some(dir) = self.directories.get_mut(file_name.as_bytes()) {
+    pub fn save_file(&mut self, data: D, file_name: &[u8]) -> BinResult<()> {
+        if let Some(dir) = self.directories.get_mut(file_name) {
             return dir.put_data(data);
         }
         self.add_file(data, file_name)?;
@@ -175,7 +175,7 @@ where
         let ratio = non_text_count as f32 / data.len() as f32;
         ratio > bin_threshold
     }
-    pub fn add_file(&mut self, mut data: D, file_name: &str) -> BinResult<()> {
+    pub fn add_file(&mut self, mut data: D, file_name: &[u8]) -> BinResult<()> {
         let length = stream_length(&mut data)?;
         let uncompressed_size = length as u32;
         let crc_32_uncompressed_data = 0; //data.crc32_value();
@@ -187,7 +187,7 @@ where
         let internal_file_attributes = if Self::is_binary(&buffer) { 0 } else { 1 };
 
         let file_name = Name {
-            inner: file_name.as_bytes().to_vec(),
+            inner: file_name.to_vec(),
         };
         let directory = Directory {
             compressed: false.into(),
