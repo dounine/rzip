@@ -4,6 +4,8 @@ use crate::zip::ZipModel;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::fmt::Debug;
 use std::io;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -275,6 +277,16 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
         }
         Ok(())
     }
+    pub fn sha_value(&mut self) -> BinResult<(Vec<u8>, Vec<u8>)> {
+        let pos = self.data.stream_position()?;
+        self.data.seek(SeekFrom::Start(0))?;
+        let mut sha1 = Sha1::new();
+        let mut sha256 = Sha256::new();
+        let mut multi_writer = HashWriter(&mut sha1, &mut sha256);
+        std::io::copy(&mut self.data, &mut multi_writer)?;
+        self.data.seek(SeekFrom::Start(pos))?;
+        Ok((sha1.finalize().to_vec(), sha256.finalize().to_vec()))
+    }
     pub fn compress_callback(
         &mut self,
         crc32_computer: bool,
@@ -339,6 +351,21 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
         self.file.uncompressed_size = self.uncompressed_size;
         self.compressed = false.into();
         self.data = stream;
+        Ok(())
+    }
+}
+struct HashWriter<A, B>(A, B);
+
+impl<A: Write, B: Write> Write for HashWriter<A, B> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write_all(buf)?;
+        self.1.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()?;
+        self.1.flush()?;
         Ok(())
     }
 }

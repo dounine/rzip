@@ -12,6 +12,8 @@ members = ["example", "."]
 binrw = "0.15.0"
 crc32fast = "1.5.0"
 indexmap = "2.12.1"
+sha1 = "0.10.6"
+sha2 = "0.10.8"
 [dependencies.miniz_oxide]
 git = "https://github.com/dounine/miniz_oxide"
 #optional = true
