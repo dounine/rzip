@@ -307,7 +307,7 @@ where
         let total_size = self.computer_un_compress_size()?;
         let mut callback = Self::create_adapter(total_size, &mut binding, callback);
         let crc32_computer = self.crc32_computer.value;
-        for (name, director) in &mut self.directories.0 {
+        for (_, director) in &mut self.directories.0 {
             director.compress_callback(crc32_computer, &compression_level, &mut callback)?;
 
             director.offset_of_local_file_header = files_size as u32;

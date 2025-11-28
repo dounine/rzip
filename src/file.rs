@@ -5,15 +5,15 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, bi
 use std::io::{Cursor, Read, Seek, Write};
 
 #[binrw]
-#[brw(little,magic=0x04034b50_u32,import(model:ZipModel,compressed_size:u32,uncompressed_size:u32,crc_32_uncompressed_data:u32))]
+#[brw(little,magic=0x04034b50_u32,import(model:ZipModel,_compressed_size:u32,uncompressed_size:u32,_crc_32_uncompressed_data:u32))]
 #[derive(Debug, Clone)]
 pub struct ZipFile {
     #[bw(calc = if file_name.inner.last() == Some(&b'/') { 0x0a } else { 0x0e })]
-    pub extract_zip_spec: u8,
+    pub _extract_zip_spec: u8,
     pub extract_os: u8,
     #[br(map = |flags:u16| if flags & 0x0008 != 0 { 0 } else { flags })]
     #[bw(calc = 0)]
-    pub flags: u16,
+    pub _flags: u16,
     #[br(map = |value| if uncompressed_size == 0 {CompressionMethod::Store}else{value})]
     #[bw(map = |value| if *uncompressed_size == 0 {CompressionMethod::Store}else{value.clone()})]
     pub compression_method: CompressionMethod,

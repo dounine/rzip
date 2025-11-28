@@ -116,7 +116,7 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     pub extract_zip_spec: u8,
     pub extract_os: u8,
     #[bw(calc = 0)]
-    pub flags: u16,
+    pub _flags: u16,
     #[bw(map = |value| if *uncompressed_size == 0 {CompressionMethod::Store}else{value.clone()})]
     pub compression_method: CompressionMethod,
     #[br(parse_with = compressed_parse,args(&model,&compression_method))]
@@ -139,7 +139,7 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     pub number_of_starts: u16,
     pub internal_file_attributes: u16,
     #[bw(calc =  if file_name.inner.last() == Some(&b'/') { 0x41ED0010_u32 } else { 0x81A40000_u32 })]
-    pub external_file_attributes: u32,
+    pub _external_file_attributes: u32,
     pub offset_of_local_file_header: u32,
     #[br(args(file_name_length,))]
     pub file_name: Name,

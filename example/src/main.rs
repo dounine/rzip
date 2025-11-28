@@ -1,4 +1,3 @@
-use binrw::{BinRead, BinWrite};
 use fast_zip::CompressionLevel;
 use fast_zip::zip::FastZip;
 use std::fs;
@@ -56,7 +55,7 @@ impl Seek for MyData {
 }
 
 fn main() {
-    let data = Cursor::new(fs::read("./data/hello.zip".to_string()).unwrap());
+    let data = Cursor::new(fs::read("./data/mini.ipa".to_string()).unwrap());
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
     let mut data = MyData::Mem(data);
     // data.read_exact()
@@ -65,12 +64,18 @@ fn main() {
     let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
     let mut writer = Cursor::new(vec![]);
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
-    // zip_file
-    //     .add_file(
-    //         MyData::Mem(Cursor::new(b"hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao hello world hi world nihao nihao nihao".into())),
-    //         "hello/nihao.txt",
-    //     )
-    //     .unwrap();
+    zip_file
+        .add_file(
+            MyData::File(
+                fs::File::open(
+                    "./data/Info.plist"
+                        .to_string(),
+                )
+                .unwrap(),
+            ),
+            "Payload/MiniApp.app/Frameworks/MiniUiFramework.framework/Info.plist",
+        )
+        .unwrap();
     // zip_file.disable_crc32_computer();
     // let mut file = OpenOptions::new()
     //     .write(true)
@@ -96,7 +101,7 @@ fn main() {
         .write(true)
         .create(true)
         .truncate(true)
-        .open("./data/hello2.zip".to_string())
+        .open("./data/hello.zip".to_string())
         .unwrap();
     std::io::copy(&mut writer, &mut file).unwrap();
     // file.write_all(&writer).unwrap();
