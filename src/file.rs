@@ -8,7 +8,7 @@ use std::io::{Cursor, Read, Seek, Write};
 #[brw(little,magic=0x04034b50_u32,import(model:ZipModel,compressed_size:u32,uncompressed_size:u32,crc_32_uncompressed_data:u32))]
 #[derive(Debug, Clone)]
 pub struct ZipFile {
-    #[bw(calc = if file_name.inner.last() == Some(&b'/') { 10 } else { 14 })]
+    #[bw(calc = if file_name.inner.last() == Some(&b'/') { 0x0a } else { 0x0e })]
     pub extract_zip_spec: u8,
     pub extract_os: u8,
     #[br(map = |flags:u16| if flags & 0x0008 != 0 { 0 } else { flags })]
@@ -19,27 +19,72 @@ pub struct ZipFile {
     pub compression_method: CompressionMethod,
     pub last_modification_time: u16,
     pub last_modification_date: u16,
-    // #[br(map = |value| std::cmp::max(crc_32_uncompressed_data,value))]
-    // #[bw(map = |value| std::cmp::max(*crc_32_uncompressed_data,*value))]
     pub crc_32_uncompressed_data: u32,
-    // #[br(dbg,map = |value| std::cmp::max(compressed_size2,value))]
-    // #[bw(map = |value| std::cmp::max(*compressed_size,*value))]
+    #[bw(map = |value| if file_name.inner.ends_with(&[b'/']) {0} else {*value})]
     pub compressed_size: u32,
-    // #[br(map = |value| std::cmp::max(uncompressed_size,value))]
-    // #[bw(map = |value| std::cmp::max(*uncompressed_size,*value))]
+    #[bw(map = |value| if file_name.inner.ends_with(&[b'/']) {0} else {*value})]
     pub uncompressed_size: u32,
     #[bw(calc = file_name.inner.len() as u16)]
     pub file_name_length: u16,
     #[bw(try_calc = extra_fields.bytes())]
+    // #[bw(write_with = extra_fields_bytes, args(extra_fields.0.len() as u16,file_name.inner.ends_with(&[b'/'])))]
     pub extra_field_length: u16,
     #[br(args(file_name_length,))]
     pub file_name: Name,
     #[br(args(extra_field_length))]
+    // #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
     pub extra_fields: ExtraList,
     // pub data_descriptor: Option<DataDescriptor>,
     #[br(parse_with = data_position_parse,args(&model))]
     #[bw(if(model == ZipModel::Bin))]
     pub data_position: u64,
+}
+#[binrw::writer(writer)]
+pub fn extra_fields_bytes(extra_field_length: &u16, count: u16, is_dir: bool) -> BinResult<()> {
+    let mut cursor = Cursor::new(vec![]);
+    if is_dir && count == 0 {
+        //修复空文件夹没有ext导致无法签名bug
+        let value = ExtraList(vec![
+            Extra::UnixExtendedTimestamp {
+                mtime: Some(0x66C2AB60_i32),
+                atime: None,
+                ctime: None,
+            },
+            Extra::UnixAttrs {
+                uid: 0x000001F7_u32,
+                gid: 0x00000014_u32,
+            },
+        ]);
+        cursor.write_le(&value)?;
+        writer.write_le(&(cursor.get_ref().len() as u16))?;
+    } else {
+        writer.write_le(extra_field_length)?;
+    }
+    Ok(())
+}
+#[binrw::writer(writer)]
+pub fn extra_fields_write(
+    value: &ExtraList,
+    is_dir: bool,
+) -> BinResult<()> {
+    if is_dir && value.0.len() == 0 {
+        //修复空文件夹没有ext导致无法签名bug
+        let value = ExtraList(vec![
+            Extra::UnixExtendedTimestamp {
+                mtime: Some(0x66C2AB60_i32),
+                atime: None,
+                ctime: None,
+            },
+            Extra::UnixAttrs {
+                uid: 0x000001F7_u32,
+                gid: 0x00000014_u32,
+            },
+        ]);
+        writer.write_le(&value)?;
+    } else {
+        writer.write_le(value)?;
+    }
+    Ok(())
 }
 #[binrw::parser(reader, endian)]
 pub fn data_position_parse(model: &ZipModel) -> BinResult<u64> {

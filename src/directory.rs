@@ -8,7 +8,7 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::fmt::Debug;
 use std::io;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::string::FromUtf8Error;
 
 #[binrw]
@@ -115,7 +115,9 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     pub created_os: u8,
     pub extract_zip_spec: u8,
     pub extract_os: u8,
+    #[bw(calc = 0)]
     pub flags: u16,
+    #[bw(map = |value| if *uncompressed_size == 0 {CompressionMethod::Store}else{value.clone()})]
     pub compression_method: CompressionMethod,
     #[br(parse_with = compressed_parse,args(&model,&compression_method))]
     #[bw(if(model == ZipModel::Bin))]
@@ -123,21 +125,26 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     pub last_modification_time: u16,
     pub last_modification_date: u16,
     pub crc_32_uncompressed_data: u32,
+    #[bw(map = |value| if file_name.inner.ends_with(&[b'/']) {0} else {*value})]
     pub compressed_size: u32,
+    #[bw(map = |value| if file_name.inner.ends_with(&[b'/']) {0} else {*value})]
     pub uncompressed_size: u32,
     #[bw(calc = file_name.inner.len() as u16)]
     pub file_name_length: u16,
+    // #[bw(write_with = extra_fields_bytes, args(extra_fields.0.len() as u16,file_name.inner.ends_with(&[b'/'])))]
     #[bw(try_calc = extra_fields.bytes())]
     pub extra_field_length: u16,
     #[bw(calc = file_comment.len() as u16)]
     pub file_comment_length: u16,
     pub number_of_starts: u16,
     pub internal_file_attributes: u16,
+    #[bw(calc =  if file_name.inner.last() == Some(&b'/') { 0x41ED0010_u32 } else { 0x81A40000_u32 })]
     pub external_file_attributes: u32,
     pub offset_of_local_file_header: u32,
     #[br(args(file_name_length,))]
     pub file_name: Name,
     #[br(args(extra_field_length))]
+    // #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
     pub extra_fields: ExtraList,
     #[br(count=file_comment_length)]
     pub file_comment: Vec<u8>,
@@ -153,8 +160,8 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     #[bw(write_with = zip_file_writer,
         args(
             &model,
-            *compressed_size,
-            *uncompressed_size,
+            compressed_size,
+            uncompressed_size,
             *crc_32_uncompressed_data,
         )
     )]
@@ -275,7 +282,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
     pub fn decompressed(&mut self) -> BinResult<()> {
         self.data.seek(SeekFrom::Start(0))?;
         if self.compressed.value {
-            let mut data = Vec::with_capacity(self.uncompressed_size as usize);
+            let mut data = vec![];
             self.data.read_to_end(&mut data)?;
             let un_compress_data =
                 miniz_oxide::inflate::decompress_to_vec(&data).map_err(|e| Error::Custom {
@@ -283,11 +290,12 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
                     err: Box::new(e),
                 })?;
             let mut new_data = T::default();
-            self.uncompressed_size = un_compress_data.len() as u32;
+            // self.uncompressed_size = un_compress_data.len() as u32;
+            // self.file.uncompressed_size = un_compress_data.len() as u32;
             new_data.write_all(&un_compress_data)?;
-            new_data.seek(SeekFrom::Start(0))?;
             self.data = new_data;
             self.compressed = false.into();
+            self.data.seek(SeekFrom::Start(0))?;
         }
         Ok(())
     }
@@ -315,40 +323,66 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
         callback_fun: &mut impl FnMut(usize),
     ) -> BinResult<()> {
         if !self.compressed.value && self.compression_method == CompressionMethod::Deflate {
-            let mut data = Cursor::new(Vec::with_capacity(self.uncompressed_size as usize));
+            let mut data = T::default(); //Cursor::new(vec![]);
+            self.data.seek(SeekFrom::Start(0))?;
             let crc_32_uncompressed_data = if crc32_computer {
                 let mut hasher = crc32fast::Hasher::new();
-                self.data.seek(SeekFrom::Start(0))?;
-                loop {
-                    let mut bytes = vec![0_u8; 1024 * 1024];
-                    let size = self.data.read(&mut bytes)?;
-                    let slice = &bytes[..size];
-                    data.write_all(slice)?;
-                    hasher.update(slice);
+                // self.data.seek(SeekFrom::Start(0))?;
+                let mut buffer = vec![0u8; 1024 * 1024];
+                // self.data.read_to_end(&mut bytes)?;
+                // data.write_all(&bytes)?;
+                // self.data.seek(SeekFrom::Start(0))?;
+                // hasher.update(&bytes);
+                while let Ok(size) = self.data.read(&mut buffer) {
                     if size == 0 {
                         break;
                     }
+                    let slice = &buffer[..size];
+                    data.write_all(slice)?;
+                    hasher.update(slice);
                 }
-                hasher.finalize()
+                // loop {
+                //     let mut bytes = vec![0_u8; 1024 * 1024];
+                //     let size = self.data.read(&mut bytes)?;
+                //     let slice = &bytes[..size];
+                //     data.write_all(slice)?;
+                //     hasher.update(slice);
+                //     if size == 0 {
+                //         break;
+                //     }
+                // }
+                let value: u32 = hasher.finalize();
+                // let name = NullString(self.file_name.clone().inner).to_string();
+                //输出16进制
+                // println!("crc32_uncompressed_data: {} 0x{:x}", name, value);
+                value
             } else {
-                self.data.seek(SeekFrom::Start(0))?;
                 std::io::copy(&mut self.data, &mut data)?;
                 0
             };
+            self.data.seek(SeekFrom::Start(0))?;
+            let uncompressed_size = stream_length(&mut data)?;
             self.crc_32_uncompressed_data = crc_32_uncompressed_data; //crc32 设置为0也能安装，网页可以忽略计算加快速度
             self.file.crc_32_uncompressed_data = crc_32_uncompressed_data;
-            let data = data.into_inner();
+            self.uncompressed_size = uncompressed_size as u32;
+            self.file.uncompressed_size = uncompressed_size as u32;
+            let mut bytes = vec![];
+            data.seek(SeekFrom::Start(0))?;
+            data.read_to_end(&mut bytes)?;
+            // let data = data.into_inner();
             let mut compress_data = T::default();
-            miniz_oxide::deflate::stream::compress_stream_callback(
-                &data,
-                &mut compress_data,
-                compression_level,
-                callback_fun,
-            )
-            .map_err(|e| Error::Custom {
-                pos: 0,
-                err: Box::new(e),
-            })?;
+            if bytes.len() > 0 {
+                miniz_oxide::deflate::stream::compress_stream_callback(
+                    &bytes,
+                    &mut compress_data,
+                    compression_level,
+                    callback_fun,
+                )
+                .map_err(|e| Error::Custom {
+                    pos: 0,
+                    err: Box::new(e),
+                })?;
+            }
             self.compressed_size = stream_length(&mut compress_data)? as u32;
             self.file.compressed_size = self.compressed_size;
             compress_data.seek(SeekFrom::Start(0))?;

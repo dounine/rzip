@@ -1,6 +1,5 @@
 use crate::directory::{Bool, CompressionMethod, Directory, Name};
-use crate::extra::Extra;
-use crate::file::ZipFile;
+use crate::file::{ExtraList, ZipFile};
 use crate::util::stream_length;
 use alloc::alloc;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
@@ -152,7 +151,8 @@ where
     pub fn remove_file(&mut self, file_name: &str) {
         self.directories.swap_remove(file_name);
     }
-    pub fn save_file(&mut self, data: D, file_name: &str) -> BinResult<()> {
+    pub fn save_file(&mut self, mut data: D, file_name: &str) -> BinResult<()> {
+        data.seek(SeekFrom::Start(0))?;
         if let Some(dir) = self.directories.get_mut(file_name) {
             return dir.put_data(data);
         }
@@ -196,6 +196,19 @@ where
         let file_name = Name {
             inner: file_name.as_bytes().to_vec(),
         };
+        let extra_fields: ExtraList = vec![].into();
+        //     vec![
+        //     Extra::UnixExtendedTimestamp {
+        //         mtime: Some(1736154637),
+        //         atime: Some(1736195293),
+        //         ctime: None,
+        //     },
+        //     Extra::UnixAttrs { uid: 503, gid: 20 },
+        // ]
+        // .into();
+        // let mut ext_bytes = Cursor::new(vec![]);
+        // ext_bytes.write_le(&extra_fields)?;
+        // let extra_field_length = ext_bytes.get_ref().len() as u16;
         let directory = Directory {
             compressed: false.into(),
             data,
@@ -203,27 +216,19 @@ where
             created_os: 0x03,       //Uninx
             extract_zip_spec: 0x0E, //2.0
             extract_os: 0,          //MS-DOS
-            flags: 0,
             compression_method: CompressionMethod::Deflate,
             last_modification_time: 39620,
             last_modification_date: 23170,
             crc_32_uncompressed_data,
             compressed_size,
             uncompressed_size,
+            // extra_field_length,
             number_of_starts: 0,
             internal_file_attributes,
-            external_file_attributes: 2175008768,
+            // external_file_attributes: 2175008768,
             offset_of_local_file_header: 0,
             file_name: file_name.clone(),
-            extra_fields: vec![
-                Extra::UnixExtendedTimestamp {
-                    mtime: Some(1736154637),
-                    atime: None,
-                    ctime: None,
-                },
-                Extra::UnixAttrs { uid: 503, gid: 20 },
-            ]
-            .into(),
+            extra_fields: extra_fields.clone(),
             file_comment: vec![],
             file: ZipFile {
                 extract_os: 0, //MS-DOS
@@ -233,16 +238,9 @@ where
                 crc_32_uncompressed_data,
                 compressed_size,
                 uncompressed_size,
+                // extra_field_length,
                 file_name: file_name.clone(),
-                extra_fields: vec![
-                    Extra::UnixExtendedTimestamp {
-                        mtime: Some(1736154637),
-                        atime: Some(1736195293),
-                        ctime: None,
-                    },
-                    Extra::UnixAttrs { uid: 503, gid: 20 },
-                ]
-                .into(),
+                extra_fields,
                 data_position: 0,
             },
         };
@@ -309,7 +307,7 @@ where
         let total_size = self.computer_un_compress_size()?;
         let mut callback = Self::create_adapter(total_size, &mut binding, callback);
         let crc32_computer = self.crc32_computer.value;
-        for (_, director) in &mut self.directories.0 {
+        for (name, director) in &mut self.directories.0 {
             director.compress_callback(crc32_computer, &compression_level, &mut callback)?;
 
             director.offset_of_local_file_header = files_size as u32;
@@ -332,9 +330,13 @@ where
             file_writer.seek(SeekFrom::Start(0))?;
             let file_writer_length = std::io::copy(&mut file_writer, writer)?;
 
-            let mut data = &mut director.data;
-            data.seek(SeekFrom::Start(0))?;
-            let file_data_length = std::io::copy(&mut data, writer)?;
+            let file_data_length = if !director.file_name.inner.ends_with(&[b'/']) {
+                let mut data = &mut director.data;
+                data.seek(SeekFrom::Start(0))?;
+                std::io::copy(&mut data, writer)?
+            } else {
+                0
+            };
             files_size += file_writer_length + file_data_length;
         }
         header.seek(SeekFrom::Start(0))?;
