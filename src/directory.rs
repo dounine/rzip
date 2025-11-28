@@ -159,7 +159,7 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
         )
     )]
     pub file: ZipFile,
-    #[br(parse_with = data_parse,args(T::default(),&model,file.data_position,file.compressed_size,)
+    #[br(parse_with = data_parse,args(T::default(),&model,file.data_position,compressed_size,)
     )]
     #[bw(write_with = data_write,args(&model,))]
     pub data: T,
