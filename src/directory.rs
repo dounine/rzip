@@ -44,6 +44,13 @@ impl From<String> for Name {
         }
     }
 }
+impl From<&str> for Name {
+    fn from(value: &str) -> Self {
+        Self {
+            inner: value.as_bytes().to_vec(),
+        }
+    }
+}
 impl Name {
     pub fn into_string(self, pos: u64) -> BinResult<String> {
         self.clone().try_into().map_err(|e| Error::Custom {
