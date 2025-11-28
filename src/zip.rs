@@ -183,6 +183,7 @@ where
         ratio > bin_threshold
     }
     pub fn add_file(&mut self, mut data: D, file_name: &str) -> BinResult<()> {
+        data.seek(SeekFrom::Start(0))?;
         let length = stream_length(&mut data)?;
         let uncompressed_size = length as u32;
         let crc_32_uncompressed_data = 0; //data.crc32_value();
