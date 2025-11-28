@@ -1,8 +1,8 @@
 extern crate alloc;
 
-mod directory;
-mod extra;
-mod file;
+pub mod directory;
+pub mod extra;
+pub mod file;
 pub mod util;
 pub mod zip;
 
