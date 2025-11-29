@@ -145,6 +145,20 @@ impl<D> FastZip<D>
 where
     D: Read + Write + Seek + Clone + Default,
 {
+    pub fn empty() -> BinResult<FastZip<D>> {
+        Ok(Self {
+            crc32_computer: Default::default(),
+            eocd_offset: 0,
+            magic: Default::default(),
+            number_of_disk: 0,
+            directory_starts: 0,
+            number_of_directory_disk: 0,
+            size: 0,
+            offset: 0,
+            comment: vec![],
+            directories: IndexDirectory(IndexMap::new()),
+        })
+    }
     pub fn parse<T: Read + Seek>(reader: &mut T) -> BinResult<FastZip<D>> {
         FastZip::read_le_args(reader, (ZipModel::Parse,))
     }
