@@ -3,6 +3,7 @@ use fast_zip::zip::FastZip;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::time::Instant;
 
 #[derive(Debug)]
 pub enum MyData {
@@ -61,21 +62,23 @@ fn main() {
     // data.read_exact()
     // let mut cursor = Cursor::new(data);
     // let dd = cursor.get_mut();
+    let time = Instant::now();
     let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
+    dbg!("解析时长", time.elapsed());
     let mut writer = Cursor::new(vec![]);
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
-    zip_file
-        .add_file(
-            MyData::File(
-                fs::File::open(
-                    "./data/Info.plist"
-                        .to_string(),
-                )
-                .unwrap(),
-            ),
-            "Payload/MiniApp.app/Frameworks/MiniUiFramework.framework/Info.plist",
-        )
-        .unwrap();
+    // zip_file
+    //     .add_file(
+    //         MyData::File(
+    //             fs::File::open(
+    //                 "./data/Info.plist"
+    //                     .to_string(),
+    //             )
+    //             .unwrap(),
+    //         ),
+    //         "Payload/MiniApp.app/Frameworks/MiniUiFramework.framework/Info.plist",
+    //     )
+    //     .unwrap();
     // zip_file.disable_crc32_computer();
     // let mut file = OpenOptions::new()
     //     .write(true)
@@ -87,9 +90,22 @@ fn main() {
     // std::io::copy(&mut data, &mut file).unwrap();
     // data.set_position(0);
     let mut data = Cursor::new(vec![]);
+    let files = vec![
+        "Payload/MiniApp.app/embedded.mobileprovision".to_string(),
+        "Payload/MiniApp.app/PkgInfo".to_string(),
+        "Payload/MiniApp.app/MiniApp".to_string(),
+        "Payload/MiniApp.app/Info.plist".to_string(),
+        "Payload/MiniApp.app/META-INF/".to_string(),
+    ];
+    // zip_file.directories.retain(|k, v| files.contains(k));
+    let time = Instant::now();
     zip_file.to_bin(&mut data).unwrap();
+    dbg!("序列化时长", time.elapsed());
+    let time = Instant::now();
     let mut zip_file: FastZip<MyData> = FastZip::from_bin(&mut data).unwrap();
+    dbg!("反序列化时长", time.elapsed());
     // let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
+    let time = Instant::now();
     zip_file
         .package(
             &mut writer,
@@ -97,11 +113,12 @@ fn main() {
             // &mut |total, size, format| println!("write {}", format),
         )
         .unwrap();
+    dbg!("压缩时长", time.elapsed());
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open("./data/hello.zip".to_string())
+        .open("./data/hello2.zip".to_string())
         .unwrap();
     std::io::copy(&mut writer, &mut file).unwrap();
     // file.write_all(&writer).unwrap();

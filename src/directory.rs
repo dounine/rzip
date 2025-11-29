@@ -109,8 +109,6 @@ impl From<bool> for Bool {
 #[brw(little, magic = 0x02014b50_u32, import(model:ZipModel,))]
 #[derive(Debug, Clone)]
 pub struct Directory<T: Read + Write + Seek + Clone + Default> {
-    // #[bw(calc = Magic::Directory)]
-    // _magic: Magic,
     pub created_zip_spec: u8,
     pub created_os: u8,
     pub extract_zip_spec: u8,
@@ -125,26 +123,24 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     pub last_modification_time: u16,
     pub last_modification_date: u16,
     pub crc_32_uncompressed_data: u32,
-    #[bw(map = |value| if file_name.inner.ends_with(&[b'/']) {0} else {*value})]
+    #[bw(map = |value| if self.is_dir() {0} else {*value})]
     pub compressed_size: u32,
-    #[bw(map = |value| if file_name.inner.ends_with(&[b'/']) {0} else {*value})]
+    #[bw(map = |value| if self.is_dir() {0} else {*value})]
     pub uncompressed_size: u32,
     #[bw(calc = file_name.inner.len() as u16)]
     pub file_name_length: u16,
-    // #[bw(write_with = extra_fields_bytes, args(extra_fields.0.len() as u16,file_name.inner.ends_with(&[b'/'])))]
     #[bw(try_calc = extra_fields.bytes())]
     pub extra_field_length: u16,
     #[bw(calc = file_comment.len() as u16)]
     pub file_comment_length: u16,
     pub number_of_starts: u16,
     pub internal_file_attributes: u16,
-    #[bw(calc =  if file_name.inner.last() == Some(&b'/') { 0x41ED0010_u32 } else { 0x81A40000_u32 })]
+    #[bw(calc =  if self.is_dir() { 0x41ED0010_u32 } else { 0x81A40000_u32 })]
     pub _external_file_attributes: u32,
     pub offset_of_local_file_header: u32,
     #[br(args(file_name_length,))]
     pub file_name: Name,
     #[br(args(extra_field_length))]
-    // #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
     pub extra_fields: ExtraList,
     #[br(count=file_comment_length)]
     pub file_comment: Vec<u8>,
@@ -166,11 +162,20 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
         )
     )]
     pub file: ZipFile,
-    #[br(parse_with = data_parse,args(T::default(),&model,file.data_position,compressed_size,)
+    #[br(parse_with = data_parse,args(&model,Self::is_file(&file_name),file.data_position,compressed_size,)
     )]
-    #[bw(write_with = data_write,args(&model,))]
+    #[bw(write_with = data_write,args(&model,self.is_dir()))]
     pub data: T,
 }
+impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
+    pub fn is_dir(&self) -> bool {
+        self.file_name.inner.ends_with(&[b'/'])
+    }
+    pub fn is_file(name: &Name) -> bool {
+        name.inner.ends_with(&[b'/'])
+    }
+}
+
 #[binrw::parser(reader, endian)]
 fn compressed_parse(model: &ZipModel, compression_method: &CompressionMethod) -> BinResult<Bool> {
     if *model == ZipModel::Bin {
@@ -180,16 +185,20 @@ fn compressed_parse(model: &ZipModel, compression_method: &CompressionMethod) ->
 }
 #[binrw::parser(reader)]
 pub fn data_parse<T: Write + Seek + Default>(
-    mut data: T,
     model: &ZipModel,
+    is_dir: bool,
     data_position: u64,
     compressed_size: u32,
 ) -> BinResult<T> {
+    if is_dir {
+        return Ok(T::default());
+    }
     let pos = reader.stream_position()?;
     if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(data_position))?;
     }
     let mut take_reader = reader.take(compressed_size as u64);
+    let mut data= T::default();
     std::io::copy(&mut take_reader, &mut data)?;
     data.seek(SeekFrom::Start(0))?;
     if *model == ZipModel::Parse {
@@ -246,10 +255,13 @@ fn zip_file_parse(
     Ok(value)
 }
 #[binrw::writer(writer)]
-fn data_write<T>(value: &T, model: &ZipModel) -> BinResult<()>
+fn data_write<T>(value: &T, model: &ZipModel, is_dir: bool) -> BinResult<()>
 where
     T: Read + Write + Seek + Clone + Default,
 {
+    if is_dir {
+        return Ok(());
+    }
     if *model == ZipModel::Bin {
         let mut value = value.clone();
         value.seek(SeekFrom::Start(0))?;
