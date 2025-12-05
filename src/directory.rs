@@ -6,6 +6,7 @@ use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -107,8 +108,8 @@ impl From<bool> for Bool {
 }
 #[binrw]
 #[brw(little, magic = 0x02014b50_u32, import(model:ZipModel,))]
-#[derive(Debug, Clone)]
-pub struct Directory<T: Read + Write + Seek + Clone + Default> {
+#[derive(Debug)]
+pub struct Directory<T: Read + Write + Seek + Default> {
     pub created_zip_spec: u8,
     pub created_os: u8,
     pub extract_zip_spec: u8,
@@ -165,9 +166,39 @@ pub struct Directory<T: Read + Write + Seek + Clone + Default> {
     #[br(parse_with = data_parse,args(&model,Self::is_file(&file_name),file.data_position,compressed_size,)
     )]
     #[bw(write_with = data_write,args(&model,self.is_dir()))]
-    pub data: T,
+    pub(crate) data: RefCell<T>,
 }
-impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
+impl<T: Read + Write + Seek + Default> Directory<T> {
+    pub fn try_clone(&self) -> io::Result<Directory<T>> {
+        let mut data = self.data.borrow_mut();
+        let pos = data.stream_position()?;
+        let mut new_data = T::default();
+        std::io::copy(&mut *data, &mut new_data)?;
+        data.seek(SeekFrom::Start(pos))?;
+        Ok(Self {
+            created_zip_spec: self.created_zip_spec,
+            created_os: self.created_os,
+            extract_zip_spec: self.extract_zip_spec,
+            extract_os: self.extract_os,
+            compression_method: self.compression_method.clone(),
+            compressed: self.compressed.clone(),
+            last_modification_time: self.last_modification_time,
+            last_modification_date: self.last_modification_date,
+            crc_32_uncompressed_data: self.crc_32_uncompressed_data,
+            compressed_size: self.compressed_size,
+            uncompressed_size: self.uncompressed_size,
+            number_of_starts: self.number_of_starts,
+            internal_file_attributes: self.internal_file_attributes,
+            offset_of_local_file_header: self.offset_of_local_file_header,
+            file_name: self.file_name.clone(),
+            extra_fields: self.extra_fields.clone(),
+            file_comment: self.file_comment.clone(),
+            file: self.file.clone(),
+            data: RefCell::new(new_data),
+        })
+    }
+}
+impl<T: Read + Write + Seek + Default> Directory<T> {
     pub fn is_dir(&self) -> bool {
         self.file_name.inner.ends_with(&[b'/'])
     }
@@ -189,22 +220,22 @@ pub fn data_parse<T: Write + Seek + Default>(
     is_dir: bool,
     data_position: u64,
     compressed_size: u32,
-) -> BinResult<T> {
+) -> BinResult<RefCell<T>> {
     if is_dir {
-        return Ok(T::default());
+        return Ok(RefCell::new(T::default()));
     }
     let pos = reader.stream_position()?;
     if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(data_position))?;
     }
     let mut take_reader = reader.take(compressed_size as u64);
-    let mut data= T::default();
+    let mut data = T::default();
     std::io::copy(&mut take_reader, &mut data)?;
     data.seek(SeekFrom::Start(0))?;
     if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(pos))?;
     }
-    Ok(data)
+    Ok(RefCell::new(data))
 }
 #[binrw::writer(writer, endian)]
 fn zip_file_writer(
@@ -255,29 +286,39 @@ fn zip_file_parse(
     Ok(value)
 }
 #[binrw::writer(writer)]
-fn data_write<T>(value: &T, model: &ZipModel, is_dir: bool) -> BinResult<()>
+fn data_write<T>(value: &RefCell<T>, model: &ZipModel, is_dir: bool) -> BinResult<()>
 where
-    T: Read + Write + Seek + Clone + Default,
+    T: Read + Write + Seek + Default,
 {
     if is_dir {
         return Ok(());
     }
     if *model == ZipModel::Bin {
-        let mut value = value.clone();
+        let mut value = value.borrow_mut();
+        let pos = value.stream_position()?;
         value.seek(SeekFrom::Start(0))?;
-        std::io::copy(&mut value, writer)?;
+        std::io::copy(&mut *value, writer)?;
+        value.seek(SeekFrom::Start(pos))?;
     }
     Ok(())
 }
-impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
+impl<T: Read + Write + Seek + Default> Directory<T> {
+    pub fn data(&self) -> core::cell::Ref<'_, T> {
+        self.data.borrow()
+    }
+    pub fn data_mut(&mut self) -> core::cell::RefMut<'_, T> {
+        self.data.borrow_mut()
+    }
+}
+impl<T: Read + Write + Seek + Default> Directory<T> {
     pub fn compressed(&self) -> bool {
         self.compressed.value
     }
     pub fn decompressed_callback(&mut self, callback_fun: &mut impl FnMut(usize)) -> BinResult<()> {
-        self.data.seek(SeekFrom::Start(0))?;
+        self.data.borrow_mut().seek(SeekFrom::Start(0))?;
         if self.compressed() {
             let mut data = vec![];
-            self.data.read_to_end(&mut data)?;
+            self.data.borrow_mut().read_to_end(&mut data)?;
             let mut new_data = T::default();
             decompress_stream_callback(&data, &mut new_data, callback_fun).map_err(|e| {
                 Error::Custom {
@@ -286,16 +327,16 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
                 }
             })?;
             new_data.seek(SeekFrom::Start(0))?;
-            self.data = new_data;
+            self.data = new_data.into();
             self.compressed = false.into();
         }
         Ok(())
     }
     pub fn decompressed(&mut self) -> BinResult<()> {
-        self.data.seek(SeekFrom::Start(0))?;
+        self.data.borrow_mut().seek(SeekFrom::Start(0))?;
         if self.compressed.value {
             let mut data = vec![];
-            self.data.read_to_end(&mut data)?;
+            self.data.borrow_mut().read_to_end(&mut data)?;
             let un_compress_data =
                 miniz_oxide::inflate::decompress_to_vec(&data).map_err(|e| Error::Custom {
                     pos: 0,
@@ -305,27 +346,27 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
             // self.uncompressed_size = un_compress_data.len() as u32;
             // self.file.uncompressed_size = un_compress_data.len() as u32;
             new_data.write_all(&un_compress_data)?;
-            self.data = new_data;
+            self.data = new_data.into();
             self.compressed = false.into();
-            self.data.seek(SeekFrom::Start(0))?;
+            self.data.borrow_mut().seek(SeekFrom::Start(0))?;
         }
         Ok(())
     }
     pub fn copy_data(&mut self) -> BinResult<Vec<u8>> {
-        let pos = self.data.stream_position()?;
+        let pos = self.data.borrow_mut().stream_position()?;
         let mut data = vec![];
-        self.data.read_to_end(&mut data)?;
-        self.data.seek(SeekFrom::Start(pos))?;
+        self.data.borrow_mut().read_to_end(&mut data)?;
+        self.data.borrow_mut().seek(SeekFrom::Start(pos))?;
         Ok(data)
     }
     pub fn sha_value(&mut self) -> BinResult<(Vec<u8>, Vec<u8>)> {
-        let pos = self.data.stream_position()?;
-        self.data.seek(SeekFrom::Start(0))?;
+        let pos = self.data.borrow_mut().stream_position()?;
+        self.data.borrow_mut().seek(SeekFrom::Start(0))?;
         let mut sha1 = Sha1::new();
         let mut sha256 = Sha256::new();
         let mut multi_writer = HashWriter(&mut sha1, &mut sha256);
-        std::io::copy(&mut self.data, &mut multi_writer)?;
-        self.data.seek(SeekFrom::Start(pos))?;
+        std::io::copy(&mut *self.data.borrow_mut(), &mut multi_writer)?;
+        self.data.borrow_mut().seek(SeekFrom::Start(pos))?;
         Ok((sha1.finalize().to_vec(), sha256.finalize().to_vec()))
     }
     pub fn compress_callback(
@@ -336,7 +377,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
     ) -> BinResult<()> {
         if !self.compressed.value && self.compression_method == CompressionMethod::Deflate {
             let mut data = T::default(); //Cursor::new(vec![]);
-            self.data.seek(SeekFrom::Start(0))?;
+            self.data.borrow_mut().seek(SeekFrom::Start(0))?;
             let crc_32_uncompressed_data = if crc32_computer {
                 let mut hasher = crc32fast::Hasher::new();
                 // self.data.seek(SeekFrom::Start(0))?;
@@ -345,7 +386,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
                 // data.write_all(&bytes)?;
                 // self.data.seek(SeekFrom::Start(0))?;
                 // hasher.update(&bytes);
-                while let Ok(size) = self.data.read(&mut buffer) {
+                while let Ok(size) = self.data.borrow_mut().read(&mut buffer) {
                     if size == 0 {
                         break;
                     }
@@ -369,10 +410,10 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
                 // println!("crc32_uncompressed_data: {} 0x{:x}", name, value);
                 value
             } else {
-                std::io::copy(&mut self.data, &mut data)?;
+                std::io::copy(&mut *self.data.borrow_mut(), &mut data)?;
                 0
             };
-            self.data.seek(SeekFrom::Start(0))?;
+            self.data.borrow_mut().seek(SeekFrom::Start(0))?;
             let uncompressed_size = stream_length(&mut data)?;
             self.crc_32_uncompressed_data = crc_32_uncompressed_data; //crc32 设置为0也能安装，网页可以忽略计算加快速度
             self.file.crc_32_uncompressed_data = crc_32_uncompressed_data;
@@ -398,7 +439,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
             self.compressed_size = stream_length(&mut compress_data)? as u32;
             self.file.compressed_size = self.compressed_size;
             compress_data.seek(SeekFrom::Start(0))?;
-            self.data = compress_data;
+            self.data = compress_data.into();
         }
         Ok(())
     }
@@ -417,7 +458,7 @@ impl<T: Read + Write + Seek + Clone + Default> Directory<T> {
         self.file.compressed_size = self.compressed_size;
         self.file.uncompressed_size = self.uncompressed_size;
         self.compressed = false.into();
-        self.data = stream;
+        self.data = stream.into();
         Ok(())
     }
 }

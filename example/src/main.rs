@@ -10,14 +10,7 @@ pub enum MyData {
     File(File),
     Mem(Cursor<Vec<u8>>),
 }
-impl Clone for MyData {
-    fn clone(&self) -> Self {
-        match self {
-            MyData::File(f) => MyData::File(f.try_clone().unwrap()),
-            MyData::Mem(v) => MyData::Mem(Cursor::new(v.get_ref().clone())),
-        }
-    }
-}
+
 impl Default for MyData {
     fn default() -> Self {
         Self::Mem(Cursor::new(vec![]))
@@ -64,6 +57,14 @@ fn main() {
     // let dd = cursor.get_mut();
     let time = Instant::now();
     let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
+    if let Some(dir) = zip_file.directories.get("hi") {
+        let mut new_dir = dir.try_clone().unwrap();
+        new_dir.file_name = "".into();
+        zip_file.add_directory(new_dir).unwrap();
+    }
+    // for (a,v) in &mut zip_file.directories.0{
+    //    let a = v.clone();
+    // }
     dbg!("解析时长", time.elapsed());
     let mut writer = Cursor::new(vec![]);
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();

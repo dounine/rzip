@@ -33,8 +33,8 @@ impl Default for Magic {
 
 #[binrw]
 #[brw(little, magic = 0x04034b50_u32, import(model:ZipModel))]
-#[derive(Debug, Clone)]
-pub struct FastZip<T: Read + Write + Seek + Clone + Default> {
+#[derive(Debug)]
+pub struct FastZip<T: Read + Write + Seek + Default> {
     #[brw(if(model == ZipModel::Bin))]
     crc32_computer: Bool,
     #[br(parse_with = parse_eocd_offset,args(model.clone(),))]
@@ -63,14 +63,14 @@ pub struct FastZip<T: Read + Write + Seek + Clone + Default> {
     #[bw(if(model == ZipModel::Bin),args(&model,))]
     pub directories: IndexDirectory<T>,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct IndexDirectory<T>(pub IndexMap<String, Directory<T>>)
 where
-    T: Read + Write + Seek + Clone + Default;
+    T: Read + Write + Seek + Default;
 
 impl<T> DerefMut for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Clone + Default,
+    T: Read + Write + Seek + Default,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -78,7 +78,7 @@ where
 }
 impl<T> Deref for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Clone + Default,
+    T: Read + Write + Seek + Default,
 {
     type Target = IndexMap<String, Directory<T>>;
 
@@ -88,7 +88,7 @@ where
 }
 impl<T> BinRead for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Clone + Default,
+    T: Read + Write + Seek + Default,
 {
     type Args<'a> = (&'a ZipModel, u16);
 
@@ -113,7 +113,7 @@ where
 }
 impl<T> BinWrite for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Clone + Default,
+    T: Read + Write + Seek + Default,
 {
     type Args<'a> = (&'a ZipModel,);
 
@@ -123,7 +123,7 @@ where
         endian: Endian,
         args: Self::Args<'_>,
     ) -> BinResult<()> {
-        let (model,) = args;
+        let (model, ) = args;
         for (_, v) in &self.0 {
             v.write_options(writer, endian, (model.clone(),))?;
         }
@@ -132,7 +132,7 @@ where
 }
 impl<T> FastZip<T>
 where
-    T: Read + Write + Seek + Clone + Default,
+    T: Read + Write + Seek + Default,
 {
     pub fn enable_crc32_computer(&mut self) {
         self.crc32_computer = true.into();
@@ -143,7 +143,7 @@ where
 }
 impl<D> FastZip<D>
 where
-    D: Read + Write + Seek + Clone + Default,
+    D: Read + Write + Seek + Default,
 {
     pub fn empty() -> BinResult<FastZip<D>> {
         Ok(Self {
@@ -226,7 +226,7 @@ where
         // let extra_field_length = ext_bytes.get_ref().len() as u16;
         let directory = Directory {
             compressed: false.into(),
-            data,
+            data: data.into(),
             created_zip_spec: 0x1E, //3.0
             created_os: 0x03,       //Uninx
             extract_zip_spec: 0x0E, //2.0
@@ -287,7 +287,7 @@ where
             total_size += if !director.compressed.value
                 && director.compression_method == CompressionMethod::Deflate
             {
-                stream_length(&mut director.data)?
+                stream_length(&mut *director.data.borrow_mut())?
             } else {
                 0
             }
@@ -346,9 +346,9 @@ where
             let file_writer_length = std::io::copy(&mut file_writer, writer)?;
 
             let file_data_length = if !director.file_name.inner.ends_with(&[b'/']) {
-                let mut data = &mut director.data;
+                let mut data = director.data.borrow_mut();
                 data.seek(SeekFrom::Start(0))?;
-                std::io::copy(&mut data, writer)?
+                std::io::copy(&mut *data, writer)?
             } else {
                 0
             };
