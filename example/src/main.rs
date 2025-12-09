@@ -1,5 +1,6 @@
+use binrw::BinResult;
 use fast_zip::CompressionLevel;
-use fast_zip::zip::FastZip;
+use fast_zip::zip::{Config, FastZip, StreamDefault};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -10,7 +11,33 @@ pub enum MyData {
     File(File),
     Mem(Cursor<Vec<u8>>),
 }
+#[derive(Default, Clone)]
+pub struct MyStreamConfig {
+    pub value: bool,
+    pub size: Option<u64>,
+}
+impl Config for MyStreamConfig {
+    type Value = bool;
 
+    fn size(&self) -> Option<u64> {
+        self.size
+    }
+
+    fn size_mut(&mut self, value: u64) {
+        self.size = Some(value);
+    }
+
+}
+impl StreamDefault for MyData {
+    type Config = MyStreamConfig;
+
+    fn from_config(config: &Self::Config) -> BinResult<Self> {
+        // let v = config.value() as MyStreamConfig;
+        // let value = config.value();
+        if config.value {}
+        Ok(Self::Mem(Cursor::new(vec![])))
+    }
+}
 impl Default for MyData {
     fn default() -> Self {
         Self::Mem(Cursor::new(vec![]))
@@ -56,9 +83,11 @@ fn main() {
     // let mut cursor = Cursor::new(data);
     // let dd = cursor.get_mut();
     let time = Instant::now();
+
     let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
+    let config = MyStreamConfig::default();
     if let Some(dir) = zip_file.directories.get("hi") {
-        let mut new_dir = dir.try_clone().unwrap();
+        let mut new_dir = dir.try_clone(&config).unwrap();
         new_dir.file_name = "".into();
         zip_file.add_directory(new_dir).unwrap();
     }
@@ -107,8 +136,10 @@ fn main() {
     dbg!("反序列化时长", time.elapsed());
     // let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
     let time = Instant::now();
+    // let config = StreamConfig::default();
     zip_file
         .package(
+            &config,
             &mut writer,
             CompressionLevel::DefaultLevel,
             // &mut |total, size, format| println!("write {}", format),

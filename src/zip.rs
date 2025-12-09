@@ -8,6 +8,17 @@ use miniz_oxide::deflate::CompressionLevel;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
 
+pub trait Config: Clone + Default {
+    type Value;
+    fn size(&self) -> Option<u64>;
+    fn size_mut(&mut self, value: u64);
+}
+
+pub trait StreamDefault: Sized {
+    type Config;
+    fn from_config(config: &Self::Config) -> BinResult<Self>;
+}
+
 #[binrw]
 #[brw(repr(u8))]
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -32,9 +43,15 @@ impl Default for Magic {
 }
 
 #[binrw]
-#[brw(little, magic = 0x04034b50_u32, import(model:ZipModel))]
+#[br(little, magic = 0x04034b50_u32, import(model:ZipModel,config:&T::Config))]
+#[bw(little, magic = 0x04034b50_u32, import(model:ZipModel))]
 #[derive(Debug)]
-pub struct FastZip<T: Read + Write + Seek + Default> {
+pub struct FastZip<T>
+where
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
+{
     #[brw(if(model == ZipModel::Bin))]
     crc32_computer: Bool,
     #[br(parse_with = parse_eocd_offset,args(model.clone(),))]
@@ -58,7 +75,7 @@ pub struct FastZip<T: Read + Write + Seek + Default> {
             SeekFrom::Start(offset as u64)
         } else {
             SeekFrom::Current(0)
-        },args(&model, entries,)
+        },args(&model,config, entries,)
     )]
     #[bw(if(model == ZipModel::Bin),args(&model,))]
     pub directories: IndexDirectory<T>,
@@ -66,11 +83,15 @@ pub struct FastZip<T: Read + Write + Seek + Default> {
 #[derive(Debug)]
 pub struct IndexDirectory<T>(pub IndexMap<String, Directory<T>>)
 where
-    T: Read + Write + Seek + Default;
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone;
 
 impl<T> DerefMut for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -78,7 +99,9 @@ where
 }
 impl<T> Deref for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
 {
     type Target = IndexMap<String, Directory<T>>;
 
@@ -88,19 +111,21 @@ where
 }
 impl<T> BinRead for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
 {
-    type Args<'a> = (&'a ZipModel, u16);
+    type Args<'a> = (&'a ZipModel, &'a T::Config, u16);
 
     fn read_options<R: Read + Seek>(
         reader: &mut R,
         endian: Endian,
         args: Self::Args<'_>,
     ) -> BinResult<Self> {
-        let (model, size) = args;
+        let (model, config, size) = args;
         let mut directories = IndexMap::new();
         for _ in 0..size {
-            let dir: Directory<T> = reader.read_type_args(endian, (model.clone(),))?;
+            let dir: Directory<T> = reader.read_type_args(endian, (model, config))?;
             let name =
                 String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Custom {
                     pos: 0,
@@ -113,7 +138,9 @@ where
 }
 impl<T> BinWrite for IndexDirectory<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
 {
     type Args<'a> = (&'a ZipModel,);
 
@@ -123,16 +150,18 @@ where
         endian: Endian,
         args: Self::Args<'_>,
     ) -> BinResult<()> {
-        let (model, ) = args;
+        let (model,) = args;
         for (_, v) in &self.0 {
-            v.write_options(writer, endian, (model.clone(),))?;
+            v.write_options(writer, endian, (model,))?;
         }
         Ok(())
     }
 }
 impl<T> FastZip<T>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
 {
     pub fn enable_crc32_computer(&mut self) {
         self.crc32_computer = true.into();
@@ -141,11 +170,13 @@ where
         self.crc32_computer = false.into();
     }
 }
-impl<D> FastZip<D>
+impl<T> FastZip<T>
 where
-    D: Read + Write + Seek + Default,
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
 {
-    pub fn empty() -> BinResult<FastZip<D>> {
+    pub fn empty() -> BinResult<FastZip<T>> {
         Ok(Self {
             crc32_computer: Default::default(),
             eocd_offset: 0,
@@ -159,13 +190,19 @@ where
             directories: IndexDirectory(IndexMap::new()),
         })
     }
-    pub fn parse<T: Read + Seek>(reader: &mut T) -> BinResult<FastZip<D>> {
-        FastZip::read_le_args(reader, (ZipModel::Parse,))
+    pub fn parse<R: Read + Seek>(reader: &mut R) -> BinResult<FastZip<T>> {
+        FastZip::read_le_args(reader, (ZipModel::Parse, &T::Config::default()))
+    }
+    pub fn parse_from_config<R: Read + Seek>(
+        reader: &mut R,
+        config: &T::Config,
+    ) -> BinResult<FastZip<T>> {
+        FastZip::read_le_args(reader, (ZipModel::Parse, config))
     }
     pub fn remove_file(&mut self, file_name: &str) {
         self.directories.swap_remove(file_name);
     }
-    pub fn save_file(&mut self, mut data: D, file_name: &str) -> BinResult<()> {
+    pub fn save_file(&mut self, mut data: T, file_name: &str) -> BinResult<()> {
         data.seek(SeekFrom::Start(0))?;
         if let Some(dir) = self.directories.get_mut(file_name) {
             return dir.put_data(data);
@@ -173,7 +210,7 @@ where
         self.add_file(data, file_name)?;
         Ok(())
     }
-    pub fn add_directory(&mut self, mut dir: Directory<D>) -> BinResult<()> {
+    pub fn add_directory(&mut self, mut dir: Directory<T>) -> BinResult<()> {
         if dir.file_name.inner != dir.file.file_name.inner {
             dir.file.file_name = dir.file_name.clone();
         }
@@ -196,7 +233,7 @@ where
         let ratio = non_text_count as f32 / data.len() as f32;
         ratio > bin_threshold
     }
-    pub fn add_file(&mut self, mut data: D, file_name: &str) -> BinResult<()> {
+    pub fn add_file(&mut self, mut data: T, file_name: &str) -> BinResult<()> {
         data.seek(SeekFrom::Start(0))?;
         let length = stream_length(&mut data)?;
         let uncompressed_size = length as u32;
@@ -225,6 +262,7 @@ where
         // ext_bytes.write_le(&extra_fields)?;
         // let extra_field_length = ext_bytes.get_ref().len() as u16;
         let directory = Directory {
+            // _config: PhantomData,
             compressed: false.into(),
             data: data.into(),
             created_zip_spec: 0x1E, //3.0
@@ -294,28 +332,35 @@ where
         }
         Ok(total_size as usize)
     }
-    pub fn to_bin<T: Write + Seek>(&self, writer: &mut T) -> BinResult<()> {
+    pub fn to_bin<W: Write + Seek>(&self, writer: &mut W) -> BinResult<()> {
         self.write_le_args(writer, (ZipModel::Bin,))?;
         Ok(())
     }
-    pub fn from_bin<T: Read + Seek>(reader: &mut T) -> BinResult<Self> {
+    pub fn from_bin<R: Read + Seek>(reader: &mut R) -> BinResult<Self> {
         reader.seek(SeekFrom::Start(0))?;
-        reader.read_type_args(Endian::Little, (ZipModel::Bin,))
+        reader.read_type_args(Endian::Little, (ZipModel::Bin, &T::Config::default()))
     }
     pub fn package<W: Write + Seek>(
         &mut self,
+        config: &T::Config,
         writer: &mut W,
         compression_level: CompressionLevel,
     ) -> BinResult<()> {
-        self.package_with_callback(writer, compression_level, &mut |_total, _size, _format| {})
+        self.package_with_callback(
+            config,
+            writer,
+            compression_level,
+            &mut |_total, _size, _format| {},
+        )
     }
     pub fn package_with_callback<W: Write + Seek>(
         &mut self,
+        config: &T::Config,
         writer: &mut W,
         compression_level: CompressionLevel,
         callback: &mut impl FnMut(usize, usize, String),
     ) -> BinResult<()> {
-        let mut header = D::default();
+        let mut header = T::from_config(config)?;
         let mut files_size = 0;
         let mut directors_size = 0;
         let mut binding = 0;
@@ -323,15 +368,20 @@ where
         let mut callback = Self::create_adapter(total_size, &mut binding, callback);
         let crc32_computer = self.crc32_computer.value;
         for (_, director) in &mut self.directories.0 {
-            director.compress_callback(crc32_computer, &compression_level, &mut callback)?;
+            director.compress_callback(
+                config,
+                crc32_computer,
+                &compression_level,
+                &mut callback,
+            )?;
 
             director.offset_of_local_file_header = files_size as u32;
-            let mut directory_writer = D::default();
-            directory_writer.write_le_args(director, (ZipModel::Package,))?;
+            let mut directory_writer = T::from_config(config)?;
+            directory_writer.write_le_args(director, (&ZipModel::Package,))?;
             directory_writer.seek(SeekFrom::Start(0))?;
             directors_size += std::io::copy(&mut directory_writer, &mut header)?;
 
-            let mut file_writer = D::default();
+            let mut file_writer = T::from_config(config)?;
             let file = &director.file;
             file_writer.write_le_args(
                 &file,
@@ -364,7 +414,7 @@ where
         writer.seek(SeekFrom::Start(0))?;
         Ok(())
     }
-    fn write_eocd<T: Write + Seek>(&mut self, writer: &mut T) -> BinResult<()> {
+    fn write_eocd<R: Write + Seek>(&mut self, writer: &mut R) -> BinResult<()> {
         writer.write_le(&self.magic)?;
         writer.write_le(&self.number_of_disk)?;
         writer.write_le(&self.directory_starts)?;

@@ -1,6 +1,6 @@
 use crate::file::{ExtraList, ZipFile};
 use crate::util::stream_length;
-use crate::zip::ZipModel;
+use crate::zip::{Config, StreamDefault, ZipModel};
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, binrw};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
@@ -107,9 +107,20 @@ impl From<bool> for Bool {
     }
 }
 #[binrw]
-#[brw(little, magic = 0x02014b50_u32, import(model:ZipModel,))]
+#[brw(little, magic = 0x02014b50_u32)]
+#[br(import(model:&ZipModel,config:&T::Config,))]
+#[bw(import(model:&ZipModel,))]
 #[derive(Debug)]
-pub struct Directory<T: Read + Write + Seek + Default> {
+pub struct Directory<T>
+where
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
+    // C: Config + 'static,
+    // C::Value: Default + Clone,
+{
+    // pub(crate) _value: PhantomData<V>,
+    // pub(crate) _config: PhantomData<C>,
     pub created_zip_spec: u8,
     pub created_os: u8,
     pub extract_zip_spec: u8,
@@ -119,7 +130,7 @@ pub struct Directory<T: Read + Write + Seek + Default> {
     #[bw(map = |value| if *uncompressed_size == 0 {CompressionMethod::Store}else{value.clone()})]
     pub compression_method: CompressionMethod,
     #[br(parse_with = compressed_parse,args(&model,&compression_method))]
-    #[bw(if(model == ZipModel::Bin))]
+    #[bw(if(*model == ZipModel::Bin))]
     pub compressed: Bool,
     pub last_modification_time: u16,
     pub last_modification_date: u16,
@@ -163,19 +174,28 @@ pub struct Directory<T: Read + Write + Seek + Default> {
         )
     )]
     pub file: ZipFile,
-    #[br(parse_with = data_parse,args(&model,Self::is_file(&file_name),file.data_position,compressed_size,)
+    #[br(parse_with = data_parse,args(model,config,Self::is_file(&file_name),file.data_position,compressed_size,)
     )]
-    #[bw(write_with = data_write,args(&model,self.is_dir()))]
+    #[bw(write_with = data_write,args(model,self.is_dir()))]
     pub(crate) data: RefCell<T>,
 }
-impl<T: Read + Write + Seek + Default> Directory<T> {
-    pub fn try_clone(&self) -> io::Result<Directory<T>> {
+impl<T> Directory<T>
+where
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
+{
+    pub fn try_clone(&self, config: &T::Config) -> BinResult<Directory<T>> {
         let mut data = self.data.borrow_mut();
+        let size = stream_length(&mut *data)?;
         let pos = data.stream_position()?;
-        let mut new_data = T::default();
+        let mut config = config.clone();
+        config.size_mut(size);
+        let mut new_data = T::from_config(&config)?;
         std::io::copy(&mut *data, &mut new_data)?;
         data.seek(SeekFrom::Start(pos))?;
         Ok(Self {
+            // _config: PhantomData,
             created_zip_spec: self.created_zip_spec,
             created_os: self.created_os,
             extract_zip_spec: self.extract_zip_spec,
@@ -198,9 +218,14 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
         })
     }
 }
-impl<T: Read + Write + Seek + Default> Directory<T> {
+impl<T> Directory<T>
+where
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
+{
     pub fn is_dir(&self) -> bool {
-        self.file_name.inner.ends_with(&[b'/'])
+        self.file_name.inner.ends_with(&[])
     }
     pub fn is_file(name: &Name) -> bool {
         name.inner.ends_with(&[b'/'])
@@ -215,21 +240,30 @@ fn compressed_parse(model: &ZipModel, compression_method: &CompressionMethod) ->
     Ok((*compression_method == CompressionMethod::Deflate).into())
 }
 #[binrw::parser(reader)]
-pub fn data_parse<T: Write + Seek + Default>(
+pub fn data_parse<T>(
     model: &ZipModel,
+    config: &T::Config,
     is_dir: bool,
     data_position: u64,
     compressed_size: u32,
-) -> BinResult<RefCell<T>> {
+) -> BinResult<RefCell<T>>
+where
+    T: Write + Seek + StreamDefault,
+    T::Config: Config,
+    <T::Config as Config>::Value: Default + Clone,
+{
+    let data = T::from_config(config)?;
     if is_dir {
-        return Ok(RefCell::new(T::default()));
+        return Ok(RefCell::new(data));
     }
     let pos = reader.stream_position()?;
     if *model == ZipModel::Parse {
         reader.seek(SeekFrom::Start(data_position))?;
     }
     let mut take_reader = reader.take(compressed_size as u64);
-    let mut data = T::default();
+    let mut config = config.clone();
+    config.size_mut(compressed_size as u64);
+    let mut data = T::from_config(&config)?;
     std::io::copy(&mut take_reader, &mut data)?;
     data.seek(SeekFrom::Start(0))?;
     if *model == ZipModel::Parse {
@@ -288,7 +322,7 @@ fn zip_file_parse(
 #[binrw::writer(writer)]
 fn data_write<T>(value: &RefCell<T>, model: &ZipModel, is_dir: bool) -> BinResult<()>
 where
-    T: Read + Write + Seek + Default,
+    T: Read + Write + Seek + StreamDefault,
 {
     if is_dir {
         return Ok(());
@@ -302,7 +336,12 @@ where
     }
     Ok(())
 }
-impl<T: Read + Write + Seek + Default> Directory<T> {
+impl<T> Directory<T>
+where
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
+{
     pub fn data(&self) -> core::cell::Ref<'_, T> {
         self.data.borrow()
     }
@@ -310,16 +349,27 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
         self.data.borrow_mut()
     }
 }
-impl<T: Read + Write + Seek + Default> Directory<T> {
+impl<T> Directory<T>
+where
+    T: Read + Write + Seek + StreamDefault,
+    T::Config: Config + 'static,
+    <T::Config as Config>::Value: Default + Clone,
+{
     pub fn compressed(&self) -> bool {
         self.compressed.value
     }
-    pub fn decompressed_callback(&mut self, callback_fun: &mut impl FnMut(usize)) -> BinResult<()> {
+    pub fn decompressed_callback(
+        &mut self,
+        config: &T::Config,
+        callback_fun: &mut impl FnMut(usize),
+    ) -> BinResult<()> {
         self.data.borrow_mut().seek(SeekFrom::Start(0))?;
         if self.compressed() {
             let mut data = vec![];
             self.data.borrow_mut().read_to_end(&mut data)?;
-            let mut new_data = T::default();
+            let mut config = config.clone();
+            config.size_mut(stream_length(&mut *self.data.borrow_mut())?);
+            let mut new_data = T::from_config(&config)?;
             decompress_stream_callback(&data, &mut new_data, callback_fun).map_err(|e| {
                 Error::Custom {
                     pos: 0,
@@ -332,7 +382,7 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
         }
         Ok(())
     }
-    pub fn decompressed(&mut self) -> BinResult<()> {
+    pub fn decompressed(&mut self, config: &T::Config) -> BinResult<()> {
         self.data.borrow_mut().seek(SeekFrom::Start(0))?;
         if self.compressed.value {
             let mut data = vec![];
@@ -342,7 +392,7 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
                     pos: 0,
                     err: Box::new(e),
                 })?;
-            let mut new_data = T::default();
+            let mut new_data = T::from_config(config)?;
             // self.uncompressed_size = un_compress_data.len() as u32;
             // self.file.uncompressed_size = un_compress_data.len() as u32;
             new_data.write_all(&un_compress_data)?;
@@ -371,21 +421,19 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
     }
     pub fn compress_callback(
         &mut self,
+        config: &T::Config,
         crc32_computer: bool,
         compression_level: &CompressionLevel,
         callback_fun: &mut impl FnMut(usize),
     ) -> BinResult<()> {
         if !self.compressed.value && self.compression_method == CompressionMethod::Deflate {
-            let mut data = T::default(); //Cursor::new(vec![]);
+            let mut config = config.clone();
+            config.size_mut(self.compressed_size as u64);
+            let mut data = T::from_config(&config)?;
             self.data.borrow_mut().seek(SeekFrom::Start(0))?;
             let crc_32_uncompressed_data = if crc32_computer {
                 let mut hasher = crc32fast::Hasher::new();
-                // self.data.seek(SeekFrom::Start(0))?;
                 let mut buffer = vec![0u8; 1024 * 1024];
-                // self.data.read_to_end(&mut bytes)?;
-                // data.write_all(&bytes)?;
-                // self.data.seek(SeekFrom::Start(0))?;
-                // hasher.update(&bytes);
                 while let Ok(size) = self.data.borrow_mut().read(&mut buffer) {
                     if size == 0 {
                         break;
@@ -394,20 +442,7 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
                     data.write_all(slice)?;
                     hasher.update(slice);
                 }
-                // loop {
-                //     let mut bytes = vec![0_u8; 1024 * 1024];
-                //     let size = self.data.read(&mut bytes)?;
-                //     let slice = &bytes[..size];
-                //     data.write_all(slice)?;
-                //     hasher.update(slice);
-                //     if size == 0 {
-                //         break;
-                //     }
-                // }
                 let value: u32 = hasher.finalize();
-                // let name = NullString(self.file_name.clone().inner).to_string();
-                //输出16进制
-                // println!("crc32_uncompressed_data: {} 0x{:x}", name, value);
                 value
             } else {
                 std::io::copy(&mut *self.data.borrow_mut(), &mut data)?;
@@ -423,7 +458,9 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
             data.seek(SeekFrom::Start(0))?;
             data.read_to_end(&mut bytes)?;
             // let data = data.into_inner();
-            let mut compress_data = T::default();
+            let mut config = config.clone();
+            config.size_mut(self.compressed_size as u64);
+            let mut compress_data = T::from_config(&config)?;
             if bytes.len() > 0 {
                 miniz_oxide::deflate::stream::compress_stream_callback(
                     &bytes,
@@ -445,10 +482,11 @@ impl<T: Read + Write + Seek + Default> Directory<T> {
     }
     pub fn compress(
         &mut self,
+        config: &T::Config,
         crc32_computer: bool,
         compression_level: &CompressionLevel,
     ) -> BinResult<()> {
-        self.compress_callback(crc32_computer, compression_level, &mut |_| {})?;
+        self.compress_callback(config, crc32_computer, compression_level, &mut |_| {})?;
         Ok(())
     }
     pub fn put_data(&mut self, mut stream: T) -> BinResult<()> {
