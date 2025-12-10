@@ -7,11 +7,14 @@ use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex};
 
 pub trait Config: Clone + Default {
     type Value;
-    fn size(&self) -> Option<u64>;
-    fn size_mut(&mut self, value: u64);
+    fn compress_size(&self) -> Option<u64>;
+    fn un_compress_size(&self) -> Option<u64>;
+    fn compress_size_mut(&mut self, value: u64);
+    fn un_compress_size_mut(&mut self, value: u64);
 }
 
 pub trait StreamDefault: Sized {
@@ -132,6 +135,7 @@ where
                     err: Box::new(e),
                 })?;
             directories.insert(name, dir);
+            // println!("{}", index)
         }
         Ok(IndexDirectory(directories))
     }
@@ -191,7 +195,10 @@ where
         })
     }
     pub fn parse<R: Read + Seek>(reader: &mut R) -> BinResult<FastZip<T>> {
-        FastZip::read_le_args(reader, (ZipModel::Parse, &T::Config::default()))
+        FastZip::read_le_args(
+            reader,
+            (ZipModel::Parse, &T::Config::default()),
+        )
     }
     pub fn parse_from_config<R: Read + Seek>(
         reader: &mut R,
@@ -338,7 +345,10 @@ where
     }
     pub fn from_bin<R: Read + Seek>(reader: &mut R) -> BinResult<Self> {
         reader.seek(SeekFrom::Start(0))?;
-        reader.read_type_args(Endian::Little, (ZipModel::Bin, &T::Config::default()))
+        reader.read_type_args(
+            Endian::Little,
+            (ZipModel::Bin, &T::Config::default()),
+        )
     }
     pub fn package<W: Write + Seek>(
         &mut self,

@@ -4,6 +4,7 @@ use fast_zip::zip::{Config, FastZip, StreamDefault};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug)]
@@ -14,27 +15,47 @@ pub enum MyData {
 #[derive(Default, Clone)]
 pub struct MyStreamConfig {
     pub value: bool,
-    pub size: Option<u64>,
+    pub limit_size: Option<u64>,
+    pub compress_size: Option<u64>,
+    pub un_compress_size: Option<u64>,
+    pub open_files: u16,
 }
 impl Config for MyStreamConfig {
     type Value = bool;
 
-    fn size(&self) -> Option<u64> {
-        self.size
+    fn compress_size(&self) -> Option<u64> {
+        self.compress_size
     }
 
-    fn size_mut(&mut self, value: u64) {
-        self.size = Some(value);
+    fn un_compress_size(&self) -> Option<u64> {
+        self.un_compress_size
     }
 
+    fn compress_size_mut(&mut self, value: u64) {
+        self.compress_size = Some(value);
+    }
+
+    fn un_compress_size_mut(&mut self, value: u64) {
+        self.un_compress_size = Some(value);
+    }
 }
 impl StreamDefault for MyData {
     type Config = MyStreamConfig;
 
     fn from_config(config: &Self::Config) -> BinResult<Self> {
-        // let v = config.value() as MyStreamConfig;
-        // let value = config.value();
-        if config.value {}
+        // let mut c= config.lock().unwrap();
+        if let (Some(size), Some(limit_size)) = (config.compress_size, config.limit_size) {
+            if size > limit_size {
+                let tempfile = tempfile::tempfile()?;
+                return Ok(Self::File(tempfile.into()));
+            }
+        }
+        if let (Some(size), Some(limit_size)) = (config.un_compress_size, config.limit_size) {
+            if size > limit_size {
+                let tempfile = tempfile::tempfile()?;
+                return Ok(Self::File(tempfile.into()));
+            }
+        }
         Ok(Self::Mem(Cursor::new(vec![])))
     }
 }
@@ -76,21 +97,27 @@ impl Seek for MyData {
 }
 
 fn main() {
-    let data = Cursor::new(fs::read("./data/mini.ipa".to_string()).unwrap());
+    let data = fs::File::open("./data/苹果-1-5区.ipa".to_string()).unwrap();
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
-    let mut data = MyData::Mem(data);
+    let mut data: MyData = MyData::File(data);
     // data.read_exact()
     // let mut cursor = Cursor::new(data);
     // let dd = cursor.get_mut();
     let time = Instant::now();
 
-    let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
-    let config = MyStreamConfig::default();
-    if let Some(dir) = zip_file.directories.get("hi") {
-        let mut new_dir = dir.try_clone(&config).unwrap();
-        new_dir.file_name = "".into();
-        zip_file.add_directory(new_dir).unwrap();
-    }
+    let mut config = MyStreamConfig::default();
+    config.limit_size = Some(1024 * 100);
+    let mut zip_file: FastZip<MyData> = FastZip::parse_from_config(&mut data, &config).unwrap();
+    // for (key, dir) in &mut zip_file.directories.0 {
+    //     if *key == "Payload/Grace.app/Grace" {
+    //         dir.decompressed_callback(&config,&mut |_|{}).unwrap();
+    //     }
+    // }
+    // if let Some(dir) = zip_file.directories.get("hi") {
+    //     let mut new_dir = dir.try_clone(&config).unwrap();
+    //     new_dir.file_name = "".into();
+    //     zip_file.add_directory(new_dir).unwrap();
+    // }
     // for (a,v) in &mut zip_file.directories.0{
     //    let a = v.clone();
     // }

@@ -116,11 +116,7 @@ where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
     <T::Config as Config>::Value: Default + Clone,
-    // C: Config + 'static,
-    // C::Value: Default + Clone,
 {
-    // pub(crate) _value: PhantomData<V>,
-    // pub(crate) _config: PhantomData<C>,
     pub created_zip_spec: u8,
     pub created_os: u8,
     pub extract_zip_spec: u8,
@@ -174,7 +170,7 @@ where
         )
     )]
     pub file: ZipFile,
-    #[br(parse_with = data_parse,args(model,config,Self::is_file(&file_name),file.data_position,compressed_size,)
+    #[br(parse_with = data_parse,args(model,config,Self::is_file(&file_name),file.data_position,compressed_size,uncompressed_size)
     )]
     #[bw(write_with = data_write,args(model,self.is_dir()))]
     pub(crate) data: RefCell<T>,
@@ -190,12 +186,11 @@ where
         let size = stream_length(&mut *data)?;
         let pos = data.stream_position()?;
         let mut config = config.clone();
-        config.size_mut(size);
+        config.compress_size_mut(size);
         let mut new_data = T::from_config(&config)?;
         std::io::copy(&mut *data, &mut new_data)?;
         data.seek(SeekFrom::Start(pos))?;
         Ok(Self {
-            // _config: PhantomData,
             created_zip_spec: self.created_zip_spec,
             created_os: self.created_os,
             extract_zip_spec: self.extract_zip_spec,
@@ -246,6 +241,7 @@ pub fn data_parse<T>(
     is_dir: bool,
     data_position: u64,
     compressed_size: u32,
+    uncompressed_size: u32,
 ) -> BinResult<RefCell<T>>
 where
     T: Write + Seek + StreamDefault,
@@ -262,7 +258,8 @@ where
     }
     let mut take_reader = reader.take(compressed_size as u64);
     let mut config = config.clone();
-    config.size_mut(compressed_size as u64);
+    config.compress_size_mut(compressed_size as u64);
+    config.un_compress_size_mut(uncompressed_size as u64);
     let mut data = T::from_config(&config)?;
     std::io::copy(&mut take_reader, &mut data)?;
     data.seek(SeekFrom::Start(0))?;
@@ -365,16 +362,13 @@ where
     ) -> BinResult<()> {
         self.data.borrow_mut().seek(SeekFrom::Start(0))?;
         if self.compressed() {
-            let mut data = vec![];
-            self.data.borrow_mut().read_to_end(&mut data)?;
             let mut config = config.clone();
-            config.size_mut(stream_length(&mut *self.data.borrow_mut())?);
+            config.compress_size_mut(stream_length(&mut *self.data.borrow_mut())?);
             let mut new_data = T::from_config(&config)?;
-            decompress_stream_callback(&data, &mut new_data, callback_fun).map_err(|e| {
-                Error::Custom {
-                    pos: 0,
-                    err: Box::new(e),
-                }
+            decompress_stream_callback(&mut *self.data.borrow_mut(), &mut new_data, callback_fun)
+                .map_err(|e| Error::Custom {
+                pos: 0,
+                err: Box::new(e),
             })?;
             new_data.seek(SeekFrom::Start(0))?;
             self.data = new_data.into();
@@ -383,24 +377,7 @@ where
         Ok(())
     }
     pub fn decompressed(&mut self, config: &T::Config) -> BinResult<()> {
-        self.data.borrow_mut().seek(SeekFrom::Start(0))?;
-        if self.compressed.value {
-            let mut data = vec![];
-            self.data.borrow_mut().read_to_end(&mut data)?;
-            let un_compress_data =
-                miniz_oxide::inflate::decompress_to_vec(&data).map_err(|e| Error::Custom {
-                    pos: 0,
-                    err: Box::new(e),
-                })?;
-            let mut new_data = T::from_config(config)?;
-            // self.uncompressed_size = un_compress_data.len() as u32;
-            // self.file.uncompressed_size = un_compress_data.len() as u32;
-            new_data.write_all(&un_compress_data)?;
-            self.data = new_data.into();
-            self.compressed = false.into();
-            self.data.borrow_mut().seek(SeekFrom::Start(0))?;
-        }
-        Ok(())
+        self.decompressed_callback(config, &mut |_| {})
     }
     pub fn copy_data(&mut self) -> BinResult<Vec<u8>> {
         let pos = self.data.borrow_mut().stream_position()?;
@@ -428,8 +405,7 @@ where
     ) -> BinResult<()> {
         if !self.compressed.value && self.compression_method == CompressionMethod::Deflate {
             let mut config = config.clone();
-            config.size_mut(self.compressed_size as u64);
-            let mut data = T::from_config(&config)?;
+            config.compress_size_mut(self.compressed_size as u64);
             self.data.borrow_mut().seek(SeekFrom::Start(0))?;
             let crc_32_uncompressed_data = if crc32_computer {
                 let mut hasher = crc32fast::Hasher::new();
@@ -439,31 +415,25 @@ where
                         break;
                     }
                     let slice = &buffer[..size];
-                    data.write_all(slice)?;
                     hasher.update(slice);
                 }
                 let value: u32 = hasher.finalize();
                 value
             } else {
-                std::io::copy(&mut *self.data.borrow_mut(), &mut data)?;
                 0
             };
             self.data.borrow_mut().seek(SeekFrom::Start(0))?;
-            let uncompressed_size = stream_length(&mut data)?;
+            let uncompressed_size = stream_length(&mut *self.data.borrow_mut())?;
             self.crc_32_uncompressed_data = crc_32_uncompressed_data; //crc32 设置为0也能安装，网页可以忽略计算加快速度
             self.file.crc_32_uncompressed_data = crc_32_uncompressed_data;
             self.uncompressed_size = uncompressed_size as u32;
             self.file.uncompressed_size = uncompressed_size as u32;
-            let mut bytes = vec![];
-            data.seek(SeekFrom::Start(0))?;
-            data.read_to_end(&mut bytes)?;
-            // let data = data.into_inner();
             let mut config = config.clone();
-            config.size_mut(self.compressed_size as u64);
+            config.compress_size_mut(self.compressed_size as u64);
             let mut compress_data = T::from_config(&config)?;
-            if bytes.len() > 0 {
+            if uncompressed_size > 0 {
                 miniz_oxide::deflate::stream::compress_stream_callback(
-                    &bytes,
+                    &mut *self.data.borrow_mut(),
                     &mut compress_data,
                     compression_level,
                     callback_fun,
@@ -486,8 +456,7 @@ where
         crc32_computer: bool,
         compression_level: &CompressionLevel,
     ) -> BinResult<()> {
-        self.compress_callback(config, crc32_computer, compression_level, &mut |_| {})?;
-        Ok(())
+        self.compress_callback(config, crc32_computer, compression_level, &mut |_| {})
     }
     pub fn put_data(&mut self, mut stream: T) -> BinResult<()> {
         let length = stream_length(&mut stream)? as u32;

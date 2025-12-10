@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 binrw = "0.15.0"
 fast-zip = { package = "rzip", path = ".." }
+tempfile = "3.23.0"
