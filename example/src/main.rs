@@ -4,7 +4,6 @@ use fast_zip::zip::{Config, FastZip, StreamDefault};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[derive(Debug)]

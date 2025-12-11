@@ -7,7 +7,6 @@ use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex};
 
 pub trait Config: Clone + Default {
     type Value;
