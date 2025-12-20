@@ -27,12 +27,11 @@ pub struct ZipFile {
     #[bw(calc = file_name.inner.len() as u16)]
     pub file_name_length: u16,
     #[bw(try_calc = extra_fields.bytes())]
-    // #[bw(write_with = extra_fields_bytes, args(extra_fields.0.len() as u16,file_name.inner.ends_with(&[b'/'])))]
     pub extra_field_length: u16,
     #[br(args(file_name_length, ))]
     pub file_name: Name,
     #[br(args(extra_field_length))]
-    #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
+    // #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
     pub extra_fields: ExtraList,
     // pub data_descriptor: Option<DataDescriptor>,
     #[br(parse_with = data_position_parse,args(model))]
