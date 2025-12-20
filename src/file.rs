@@ -5,10 +5,10 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, bi
 use std::io::{Cursor, Read, Seek, Write};
 
 #[binrw]
-#[brw(little,magic=0x04034b50_u32,import(model:ZipModel,_compressed_size:u32,uncompressed_size:u32,_crc_32_uncompressed_data:u32))]
+#[brw(little, magic = 0x04034b50_u32, import(model:&ZipModel,uncompressed_size:u32))]
 #[derive(Debug, Clone)]
 pub struct ZipFile {
-    #[bw(calc = if file_name.inner.last() == Some(&b'/') { 0x0a } else { 0x0e })]
+    #[bw(calc = if file_name.inner.ends_with(&[b'/']) { 0x0a } else { 0x0e })]
     pub _extract_zip_spec: u8,
     pub extract_os: u8,
     #[br(map = |flags:u16| if flags & 0x0008 != 0 { 0 } else { flags })]
@@ -29,16 +29,73 @@ pub struct ZipFile {
     #[bw(try_calc = extra_fields.bytes())]
     // #[bw(write_with = extra_fields_bytes, args(extra_fields.0.len() as u16,file_name.inner.ends_with(&[b'/'])))]
     pub extra_field_length: u16,
-    #[br(args(file_name_length,))]
+    #[br(args(file_name_length, ))]
     pub file_name: Name,
     #[br(args(extra_field_length))]
-    // #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
+    #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
     pub extra_fields: ExtraList,
     // pub data_descriptor: Option<DataDescriptor>,
-    #[br(parse_with = data_position_parse,args(&model))]
-    #[bw(if(model == ZipModel::Bin))]
+    #[br(parse_with = data_position_parse,args(model))]
+    #[bw(if(*model == ZipModel::Bin))]
     pub data_position: u64,
 }
+// impl BinRead for ZipFile {
+//     type Args<'a> = (&'a ZipModel, u32);
+//
+//     fn read_options<R: Read + Seek>(
+//         reader: &mut R,
+//         endian: Endian,
+//         args: Self::Args<'_>,
+//     ) -> BinResult<Self> {
+//         let (model, uncompressed_size) = args;
+//         let magic: u32 = reader.read_le()?;
+//         assert_eq!(magic, 0x04034b50_u32);
+//         if true {
+//             return Ok(Self {
+//                 extract_os: 0,
+//                 compression_method: Default::default(),
+//                 last_modification_time: 0,
+//                 last_modification_date: 0,
+//                 crc_32_uncompressed_data: 0,
+//                 compressed_size: 0,
+//                 uncompressed_size,
+//                 file_name: Name { inner: vec![] },
+//                 extra_fields: ExtraList(vec![]),
+//                 data_position: 0,
+//             });
+//         }
+//         let _extract_zip_spec: u8 = reader.read_le()?;
+//         let extract_os: u8 = reader.read_le()?;
+//         let flags: u16 = reader.read_le()?;
+//         let _flags = if flags & 0x0008 != 0 { 0 } else { flags };
+//         let mut compression_method: CompressionMethod = reader.read_le()?;
+//         if uncompressed_size == 0 {
+//             compression_method = CompressionMethod::Store;
+//         }
+//         let last_modification_time: u16 = reader.read_le()?;
+//         let last_modification_date: u16 = reader.read_le()?;
+//         let crc_32_uncompressed_data: u32 = reader.read_le()?;
+//         let compressed_size: u32 = reader.read_le()?;
+//         let uncompressed_size: u32 = reader.read_le()?;
+//         let file_name_length: u16 = reader.read_le()?;
+//         let extra_field_length: u16 = reader.read_le()?;
+//         let file_name: Name = reader.read_le_args((file_name_length,))?;
+//         let extra_fields: ExtraList = reader.read_le_args((extra_field_length,))?;
+//         let data_position: u64 = data_position_parse(reader, endian, (model,))?;
+//         Ok(Self {
+//             extract_os,
+//             compression_method,
+//             last_modification_time,
+//             last_modification_date,
+//             crc_32_uncompressed_data,
+//             compressed_size,
+//             uncompressed_size,
+//             file_name,
+//             extra_fields,
+//             data_position,
+//         })
+//     }
+// }
 #[binrw::writer(writer)]
 pub fn extra_fields_bytes(extra_field_length: &u16, count: u16, is_dir: bool) -> BinResult<()> {
     let mut cursor = Cursor::new(vec![]);
@@ -63,10 +120,7 @@ pub fn extra_fields_bytes(extra_field_length: &u16, count: u16, is_dir: bool) ->
     Ok(())
 }
 #[binrw::writer(writer)]
-pub fn extra_fields_write(
-    value: &ExtraList,
-    is_dir: bool,
-) -> BinResult<()> {
+pub fn extra_fields_write(value: &ExtraList, is_dir: bool) -> BinResult<()> {
     if is_dir && value.0.len() == 0 {
         //修复空文件夹没有ext导致无法签名bug
         let value = ExtraList(vec![

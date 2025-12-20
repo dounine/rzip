@@ -1,4 +1,5 @@
 extern crate alloc;
+extern crate core;
 
 pub mod directory;
 pub mod extra;
