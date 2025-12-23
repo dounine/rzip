@@ -117,7 +117,6 @@ pub struct Directory<T>
 where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub created_zip_spec: u8,
     pub created_os: u8,
@@ -181,16 +180,15 @@ impl<T> BinRead for Directory<T>
 where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
 {
-    type Args<'a> = (u16, &'a ZipModel, &'a T::Config);
+    type Args<'a> = (u16, &'a ZipModel, &'a T::Config, &'a mut dyn FnMut(u64));
 
     fn read_options<R: Read + Seek>(
         reader: &mut R,
         endian: Endian,
         args: Self::Args<'_>,
     ) -> BinResult<Self> {
-        let (_index, model, config) = args;
+        let (_index, model, config, read_bytes) = args;
         // if index >= 4 {
         //     return Ok(Self {
         //         created_zip_spec: 0,
@@ -315,6 +313,7 @@ where
         //     // let mut bytes = vec![0u8;4];
         //     // reader.read_exact(&mut bytes)?;
         // reader.read_exact(&mut [0u8;4])?;
+        let pos = reader.stream_position()?;
         let magic: u32 = reader.read_le()?;
         assert_eq!(magic, 0x02014b50_u32);
         let created_zip_spec: u8 = reader.read_le()?;
@@ -365,12 +364,9 @@ where
         let file: ZipFile = zip_file_parse(
             reader,
             endian,
-            (
-                &model,
-                offset_of_local_file_header,
-                uncompressed_size,
-            ),
+            (&model, offset_of_local_file_header, uncompressed_size),
         )?;
+        read_bytes(reader.stream_position()? - pos);
         // reader.seek(SeekFrom::Start(pos))?;
         let data = if !Self::is_file(&file_name) {
             T::from_config(config)?
@@ -385,7 +381,17 @@ where
             config.un_compress_size_mut(uncompressed_size as u64);
             // console::log_2(&JsValue::from_str("come in"),&JsValue::from_str(file_name.clone().into_string(0)?.as_str()));
             let mut data = T::from_config(&config)?;
-            std::io::copy(&mut take_reader, &mut data)?;
+            let chunk_size = 1024;
+            let mut buffer = vec![0u8; chunk_size];
+            loop {
+                let len = take_reader.read(&mut buffer)?;
+                if len == 0 {
+                    break;
+                }
+                data.write_all(&buffer)?;
+                read_bytes(len as u64);
+            }
+            // std::io::copy(&mut take_reader, &mut data)?;
             // if file_name.clone().into_string(0)? == "Payload/SideStore.app/AppIcon60x60@2x.png" {
             //     let len = data2.seek(SeekFrom::End(0))?;
             //     // console::log_6(
@@ -521,15 +527,7 @@ where
         writer.write_le(&self.extra_fields)?;
         writer.write_le(&self.file_comment)?;
 
-        zip_file_writer(
-            &self.file,
-            writer,
-            endian,
-            (
-                &model,
-                uncompressed_size,
-            ),
-        )?;
+        zip_file_writer(&self.file, writer, endian, (&model, uncompressed_size))?;
         data_write(&self.data, writer, endian, (&model, self.is_dir()))?;
         Ok(())
     }
@@ -635,11 +633,7 @@ where
     Ok(data)
 }
 #[binrw::writer(writer, endian)]
-fn zip_file_writer(
-    value: &ZipFile,
-    model: &ZipModel,
-    uncompressed_size: u32,
-) -> BinResult<()> {
+fn zip_file_writer(value: &ZipFile, model: &ZipModel, uncompressed_size: u32) -> BinResult<()> {
     if *model == ZipModel::Bin {
         writer.write_type_args(value, endian, (model, uncompressed_size))?;
     }
@@ -742,7 +736,7 @@ where
         config: &T::Config,
         crc32_computer: bool,
         compression_level: &CompressionLevel,
-        callback_fun: &mut impl FnMut(usize),
+        callback_fun: &mut impl FnMut(u64),
     ) -> BinResult<()> {
         if !self.compressed.value && self.compression_method == CompressionMethod::Deflate {
             let mut config = config.clone();

@@ -1,7 +1,7 @@
-use std::fmt::{Display, Formatter};
 use binrw::BinResult;
 use fast_zip::CompressionLevel;
 use fast_zip::zip::{Config, FastZip, StreamDefault};
+use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -162,16 +162,20 @@ fn main() {
     let time = Instant::now();
 
     config.limit_size = Some(1024 * 100);
-    let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
-    for (key, dir) in &mut zip_file.directories.0 {
-        if key == "Payload/SideStore.app/AppIcon60x60@2x.png" {
-            dir.decompressed().unwrap();
-            // dir.data_mut().decompressed(&config).unwrap();
-        }
-        // let data = &mut *dir.data.borrow_mut();
-        // let len = data.seek(SeekFrom::End(0)).unwrap();
-        // let a = &mut *dir.data_mut();
-    }
+    let mut zip_file: FastZip<MyData> =
+        FastZip::parse_with_callback(&mut data, &mut |total, sum, format| {
+            println!("process {}", format);
+        })
+        .unwrap();
+    // for (key, dir) in &mut zip_file.directories.0 {
+    //     if key == "Payload/SideStore.app/AppIcon60x60@2x.png" {
+    //         dir.decompressed().unwrap();
+    //         // dir.data_mut().decompressed(&config).unwrap();
+    //     }
+    //     // let data = &mut *dir.data.borrow_mut();
+    //     // let len = data.seek(SeekFrom::End(0)).unwrap();
+    //     // let a = &mut *dir.data_mut();
+    // }
     // for (key, dir) in &mut zip_file.directories.0 {
     //     if *key == "Payload/Grace.app/Grace" {
     //         dir.decompressed_callback(&config,&mut |_|{}).unwrap();
