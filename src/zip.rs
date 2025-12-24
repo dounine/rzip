@@ -23,6 +23,10 @@ pub trait StreamDefault: Sized {
     type Config;
     fn from(&self) -> BinResult<Self>;
     fn from_config(config: &Self::Config) -> BinResult<Self>;
+    fn from_ref_config(_pos: u64, _size: u64, config: &Self::Config) -> BinResult<(Self, bool)> {
+        Ok((Self::from_config(config)?, true))
+    }
+
     fn config(&self) -> &Self::Config;
 }
 

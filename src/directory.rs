@@ -375,21 +375,27 @@ where
             if *model == ZipModel::Parse {
                 reader.seek(SeekFrom::Start(file.data_position))?;
             }
+            let config_pos = reader.stream_position()?;
             let mut take_reader = reader.take(compressed_size as u64);
             let mut config = config.clone();
             config.compress_size_mut(compressed_size as u64);
             config.un_compress_size_mut(uncompressed_size as u64);
             // console::log_2(&JsValue::from_str("come in"),&JsValue::from_str(file_name.clone().into_string(0)?.as_str()));
-            let mut data = T::from_config(&config)?;
-            let chunk_size = 1024;
-            let mut buffer = vec![0u8; chunk_size];
-            loop {
-                let len = take_reader.read(&mut buffer)?;
-                if len == 0 {
-                    break;
+            let (mut data, need_copy) =
+                T::from_ref_config(config_pos, compressed_size as u64, &config)?;
+            if need_copy {
+                let chunk_size = 1024;
+                let mut buffer = vec![0u8; chunk_size];
+                loop {
+                    let len = take_reader.read(&mut buffer)?;
+                    if len == 0 {
+                        break;
+                    }
+                    data.write_all(&buffer)?;
+                    read_bytes(len as u64);
                 }
-                data.write_all(&buffer)?;
-                read_bytes(len as u64);
+            } else {
+                read_bytes(compressed_size as u64);
             }
             // std::io::copy(&mut take_reader, &mut data)?;
             // if file_name.clone().into_string(0)? == "Payload/SideStore.app/AppIcon60x60@2x.png" {
@@ -472,7 +478,7 @@ impl<T> BinWrite for Directory<T>
 where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
+// <T::Config as Config>::Value: Display + Default + Clone,
 {
     type Args<'a> = (&'a ZipModel,);
 
@@ -482,7 +488,7 @@ where
         endian: Endian,
         args: Self::Args<'_>,
     ) -> BinResult<()> {
-        let (model,) = args;
+        let (model, ) = args;
         writer.write_le(&0x02014b50_u32)?;
         writer.write_le(&self.created_zip_spec)?;
         writer.write_le(&self.created_os)?;
@@ -536,7 +542,7 @@ impl<T> Directory<T>
 where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
+// <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn try_clone(&self, config: &T::Config) -> BinResult<Directory<T>> {
         let mut data = self.data.borrow_mut();
@@ -574,7 +580,7 @@ impl<T> Directory<T>
 where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
+// <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn is_dir(&self) -> bool {
         self.file_name.inner.ends_with(&[b'/'])
@@ -676,7 +682,7 @@ impl<T> Directory<T>
 where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
+// <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn data(&self) -> core::cell::Ref<'_, T> {
         self.data.borrow()
@@ -689,7 +695,7 @@ impl<T> Directory<T>
 where
     T: Read + Write + Seek + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
+// <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn compressed(&self) -> bool {
         self.compressed.value
@@ -702,9 +708,9 @@ where
             let mut new_data = T::from_config(&config)?;
             decompress_stream_callback(&mut *self.data.borrow_mut(), &mut new_data, callback_fun)
                 .map_err(|e| Error::Custom {
-                pos: 0,
-                err: Box::new(e),
-            })?;
+                    pos: 0,
+                    err: Box::new(e),
+                })?;
             new_data.seek(SeekFrom::Start(0))?;
             self.data = RefCell::new(new_data);
             self.compressed = false.into();
@@ -773,10 +779,10 @@ where
                     compression_level,
                     callback_fun,
                 )
-                .map_err(|e| Error::Custom {
-                    pos: 0,
-                    err: Box::new(e),
-                })?;
+                    .map_err(|e| Error::Custom {
+                        pos: 0,
+                        err: Box::new(e),
+                    })?;
             }
             self.compressed_size = stream_length(&mut compress_data)? as u32;
             self.file.compressed_size = self.compressed_size;
