@@ -182,7 +182,7 @@ impl Seek for MyData {
 #[tokio::main]
 async fn main() {
     // let data = fs::File::open("./data/SideStore.ipa".to_string()).unwrap();
-    let data = fs::read("./data/fsign.ipa".to_string()).unwrap();
+    let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
     let mut config = MyStreamConfig::default();
     let mut data: MyData = MyData::Mem {
@@ -195,15 +195,17 @@ async fn main() {
     let time = Instant::now();
 
     config.limit_size = Some(1024 * 100);
-    let mut zip_file: FastZip<MyData> =
-        FastZip::parse_with_callback(&mut data, |total, sum| {
-            Box::pin(async move{
-                let format = format!("{:.2}%", (sum as f64 / total as f64) * 100.0);
-                println!("process {}", format);
-            })
+    let mut zip_file: FastZip<MyData> = FastZip::parse_with_callback(&mut data, |total, sum| {
+        Box::pin(async move {
+            let format = format!("{:.2}%", (sum as f64 / total as f64) * 100.0);
+            // println!("process {}", format);
         })
-        .await
-        .unwrap();
+    })
+    .await
+    .unwrap();
+    for (key,dir) in &mut zip_file.directories.0{
+        dir.decompressed().await.unwrap();
+    }
     // for (key, dir) in &mut zip_file.directories.0 {
     //     if key == "Payload/SideStore.app/AppIcon60x60@2x.png" {
     //         dir.decompressed().unwrap();
@@ -272,6 +274,7 @@ async fn main() {
     // // let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
     // let time = Instant::now();
     // // let config = StreamConfig::default();
+    let time = Instant::now();
     zip_file
         .package(
             &mut writer,
@@ -280,8 +283,12 @@ async fn main() {
         )
         .await
         .unwrap();
+    // zip_file
+    // .package_parallel(&mut writer, CompressionLevel::DefaultLevel)
+    // .await
+    // .unwrap();
     writer.seek(SeekFrom::Start(0)).await.unwrap();
-    // dbg!("压缩时长", time.elapsed());
+    dbg!("压缩时长", time.elapsed());
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)

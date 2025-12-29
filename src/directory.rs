@@ -8,8 +8,6 @@ use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
-use sha1::{Digest, Sha1};
-use sha2::Sha256;
 use std::fmt::Debug;
 use std::io;
 use std::io::SeekFrom;
@@ -208,6 +206,7 @@ where
     // #[br(parse_with = compressed_parse,args(&model,&compression_method))]
     // #[bw(if(*model == ZipModel::Bin))]
     pub compressed: bool,
+    pub sha_value: Option<(Vec<u8>, Vec<u8>)>,
     pub last_modification_time: u16,
     pub last_modification_date: u16,
     pub crc_32_uncompressed_data: u32,
@@ -348,6 +347,7 @@ where
                 extract_os,
                 compression_method,
                 compressed,
+                sha_value: None,
                 last_modification_time,
                 last_modification_date,
                 crc_32_uncompressed_data,
@@ -458,6 +458,7 @@ where
                     extract_os: self.extract_os,
                     compression_method: self.compression_method.clone(),
                     compressed: self.compressed,
+                    sha_value: None,
                     last_modification_time: self.last_modification_time,
                     last_modification_date: self.last_modification_date,
                     crc_32_uncompressed_data: self.crc_32_uncompressed_data,
@@ -646,22 +647,25 @@ where
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             if self.compressed() {
-                let new_data = {
+                let (new_data, sha) = {
                     let mut data = self.data.lock().await;
                     if let Some(data) = &mut *data {
                         data.seek(SeekFrom::Start(0)).await?;
                         let mut config = data.config().clone();
                         let length = stream_length(&mut *data).await?;
                         config.compress_size_mut(length);
-                        let mut new_data = T::from_config(&config).await?;
-                        decompress_stream_callback(&mut *data, &mut new_data, callback_fun)
+                        let new_data = T::from_config(&config).await?;
+                        let mut hash_writer = HashWriter::new(new_data);
+                        decompress_stream_callback(&mut *data, &mut hash_writer, callback_fun)
                             .await
                             .map_err(|e| Error::Custom {
                                 pos: 0,
                                 err: Box::new(e),
                             })?;
+                        let value = hash_writer.hash();
+                        let mut new_data = hash_writer.into_inner();
                         new_data.seek(SeekFrom::Start(0)).await?;
-                        new_data
+                        (new_data, value)
                     } else {
                         return Err(Error::AssertFail {
                             pos: 0,
@@ -669,6 +673,7 @@ where
                         });
                     }
                 };
+                self.sha_value = Some(sha);
                 self.data = Arc::new(async_lock::Mutex::new(Some(new_data)));
                 self.compressed = false;
             }
@@ -699,16 +704,18 @@ where
             }
         }
     }
-    pub fn sha_value(&mut self) -> impl Future<Output = BinResult<(Vec<u8>, Vec<u8>)>> + Send {
+    pub fn sha_build(&mut self) -> impl Future<Output = BinResult<(Vec<u8>, Vec<u8>)>> + Send {
         async move {
             let mut data = self.data.lock().await;
             if let Some(data) = &mut *data {
                 let pos = data.stream_position().await?;
                 data.seek(SeekFrom::Start(0)).await?;
-                let mut multi_writer = HashWriter::new();
+                let mut multi_writer = HashWriterNull::new();
                 binrw::io::copy(&mut *data, &mut multi_writer).await?;
                 data.seek(SeekFrom::Start(pos)).await?;
-                Ok(multi_writer.hash())
+                let sha = multi_writer.hash();
+                self.sha_value = Some(sha.clone());
+                Ok(sha)
             } else {
                 Err(Error::AssertFail {
                     pos: 0,
@@ -782,6 +789,7 @@ where
                     }
                 };
                 self.data = Arc::new(async_lock::Mutex::new(compress_data));
+                self.compressed = true;
             }
             Ok(())
         }
@@ -802,6 +810,7 @@ where
     pub fn put_data(&mut self, mut stream: T) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             let length = stream_length(&mut stream).await? as u32;
+            self.sha_value = None;
             self.compressed_size = length;
             self.uncompressed_size = length;
             self.file.compressed_size = self.compressed_size;
@@ -812,21 +821,126 @@ where
         }
     }
 }
-struct HashWriter(Sha1, Sha256);
-impl HashWriter {
+// pub struct HashWriter(Sha1, Sha256);
+// impl HashWriter {
+//     pub fn new() -> Self {
+//         HashWriter(Sha1::new(), Sha256::new())
+//     }
+//     pub fn hash(self) -> (Vec<u8>, Vec<u8>) {
+//         (self.0.finalize().to_vec(), self.1.finalize().to_vec())
+//     }
+// }
+// impl Write for HashWriter {
+//     fn write(&mut self, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
+//         async move {
+//             std::io::Write::write(&mut self.0, buf)?;
+//             let size = std::io::Write::write(&mut self.1, buf)?;
+//             Ok(size)
+//         }
+//     }
+//
+//     fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send {
+//         async move {
+//             std::io::Write::flush(&mut self.0)?;
+//             std::io::Write::flush(&mut self.1)?;
+//             Ok(())
+//         }
+//     }
+// }
+
+struct HashWriter<T> {
+    sha1: Option<sha1::Sha1>,
+    sha256: Option<sha2::Sha256>,
+    data: T,
+}
+impl<T> HashWriter<T>
+where
+    T: Write + Seek + Send,
+{
+    pub fn new(data: T) -> Self {
+        use sha1::Digest;
+        HashWriter {
+            sha1: Some(sha1::Sha1::new()),
+            sha256: Some(sha2::Sha256::new()),
+            data,
+        }
+    }
+    pub fn hash(&mut self) -> (Vec<u8>, Vec<u8>) {
+        if let (Some(sha1), Some(sha2)) = (self.sha1.take(), self.sha256.take()) {
+            use sha1::Digest;
+            return (sha1.finalize().to_vec(), sha2.finalize().to_vec());
+        }
+        (vec![], vec![])
+    }
+    pub fn into_inner(self) -> T {
+        self.data
+    }
+}
+impl<T> Seek for HashWriter<T>
+where
+    T: Write + Seek + Send,
+{
+    fn seek(&mut self, pos: SeekFrom) -> impl Future<Output = std::io::Result<u64>> + Send {
+        self.data.seek(pos)
+    }
+}
+impl<T> Write for HashWriter<T>
+where
+    T: Write + Seek + Send,
+{
+    fn write(&mut self, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
+        async move {
+            self.data.write_all(buf).await?;
+            if let (Some(sha1), Some(sha2)) = (&mut self.sha1, &mut self.sha256) {
+                std::io::Write::write(sha1, buf)?;
+                let size = std::io::Write::write(sha2, buf)?;
+                return Ok(size as usize);
+            }
+            Ok(0)
+        }
+    }
+
+    fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send {
+        async move {
+            self.data.flush().await?;
+            if let (Some(sha1), Some(sha2)) = (&mut self.sha1, &mut self.sha256) {
+                std::io::Write::flush(sha1)?;
+                std::io::Write::flush(sha2)?;
+            }
+            Ok(())
+        }
+    }
+}
+pub struct HashWriterNull(sha1::Sha1, sha2::Sha256);
+impl HashWriterNull {
     pub fn new() -> Self {
-        HashWriter(Sha1::new(), Sha256::new())
+        use sha2::Digest;
+        Self {
+            0: sha1::Sha1::new(),
+            1: sha2::Sha256::new(),
+        }
     }
     pub fn hash(self) -> (Vec<u8>, Vec<u8>) {
+        use sha1::Digest;
         (self.0.finalize().to_vec(), self.1.finalize().to_vec())
     }
 }
-impl Write for HashWriter {
+impl Seek for HashWriterNull {
+    fn seek(&mut self, _pos: SeekFrom) -> impl Future<Output = io::Result<u64>> + Send {
+        async move {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "HashWriterNull cannot call seek",
+            ))
+        }
+    }
+}
+impl Write for HashWriterNull {
     fn write(&mut self, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
         async move {
-            std::io::Write::write(&mut self.0, buf)?;
-            let size = std::io::Write::write(&mut self.1, buf)?;
-            Ok(size)
+            std::io::Write::write_all(&mut self.0, buf)?;
+            std::io::Write::write_all(&mut self.1, buf)?;
+            Ok(buf.len())
         }
     }
 

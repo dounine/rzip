@@ -523,6 +523,7 @@ where
                     extra_fields,
                     data_position: 0,
                 },
+                sha_value: None,
             };
             let name = String::from_utf8(directory.file_name.inner.clone()).map_err(|e| {
                 Error::Custom {
@@ -604,6 +605,48 @@ where
             .await
         }
     }
+
+    #[cfg(feature = "parallel")]
+    pub fn package_parallel(
+        &mut self,
+        writer: &mut T,
+        compression_level: CompressionLevel,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        T: 'static,
+    {
+        use tokio::task::JoinSet;
+        async move {
+            let cfg = writer.config().clone();
+            let crc32 = self.crc32_computer;
+            let directories = std::mem::take(&mut self.directories.0);
+
+            let mut set = JoinSet::new();
+            for (index, (name, mut dir)) in directories.into_iter().enumerate() {
+                let cfg = cfg.clone();
+                set.spawn(async move {
+                    dir.compress(&cfg, crc32, compression_level).await?;
+                    Ok::<(usize, String, Directory<T>), binrw::Error>((index, name, dir))
+                });
+            }
+
+            let mut results = Vec::new();
+            while let Some(res) = set.join_next().await {
+                let (index, name, dir) = res.map_err(|e| binrw::Error::Custom {
+                    pos: 0,
+                    err: Box::new(e),
+                })??;
+                results.push((index, name, dir));
+            }
+
+            results.sort_by_key(|(index, _, _)| *index);
+
+            for (_, name, dir) in results {
+                self.directories.insert(name, dir);
+            }
+            self.package(writer, compression_level).await
+        }
+    }
     pub fn package_with_callback<F>(
         &mut self,
         writer: &mut T,
@@ -630,7 +673,6 @@ where
                         &mut callback,
                     )
                     .await?;
-
                 director.offset_of_local_file_header = files_size as u32;
                 let mut directory_writer = writer.from().await?;
                 directory_writer
