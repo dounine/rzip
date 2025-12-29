@@ -1,17 +1,19 @@
-use crate::directory::{Bool, CompressionMethod, Directory, Name};
+use crate::directory::{CompressionMethod, Directory, Name};
 use crate::file::{ExtraList, ZipFile};
 use crate::util::stream_length;
-use binrw::{
-    BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error, VecArgs, binrw,
-};
+use binrw::io::read::Read;
+use binrw::io::seek::Seek;
+use binrw::io::write::Write;
+use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use core::fmt::{Debug, Display};
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
-use std::cell::RefCell;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
+use std::sync::Arc;
 
-pub trait Config: Display + Clone + Default {
+pub trait Config: Display + Sync + Send + Clone + Default {
     // type Value;
     fn compress_size(&self) -> Option<u64>;
     fn un_compress_size(&self) -> Option<u64>;
@@ -21,17 +23,22 @@ pub trait Config: Display + Clone + Default {
 
 pub trait StreamDefault: Sized {
     type Config;
-    fn from(&self) -> BinResult<Self>;
-    fn from_config(config: &Self::Config) -> BinResult<Self>;
-    fn from_ref_config(_pos: u64, _size: u64, config: &Self::Config) -> BinResult<(Self, bool)> {
-        Ok((Self::from_config(config)?, true))
+    fn from(&self) -> impl Future<Output = BinResult<Self>> + Send;
+    fn from_config(config: &Self::Config) -> impl Future<Output = BinResult<Self>> + Send;
+    fn from_ref_config(
+        _pos: u64,
+        _size: u64,
+        config: &Self::Config,
+    ) -> impl Future<Output = BinResult<(Self, bool)>> + Send {
+        let data = Self::from_config(config);
+        async move { Ok((data.await?, true)) }
     }
 
     fn config(&self) -> &Self::Config;
 }
 
-#[binrw]
-#[brw(repr(u8))]
+// #[binrw]
+// #[brw(repr(u8))]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ZipModel {
     Parse,
@@ -39,13 +46,63 @@ pub enum ZipModel {
     Bin,
 }
 
-#[binrw]
-#[brw(repr(u32))]
+// #[binrw]
+// #[brw(repr(u32))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Magic {
     EoCd = 0x06054b50,
     Directory = 0x02014b50,
     File = 0x04034b50,
+}
+impl BinRead for Magic {
+    type Args<'a> = ();
+    fn read_options<R: Read + Seek + Send>(
+        reader: &mut R,
+        endian: Endian,
+        args: Self::Args<'_>,
+    ) -> impl Future<Output = BinResult<Self>> + Send
+    where
+        Self: Send,
+    {
+        async move {
+            let value: u32 = reader.read_type_args(endian, args).await?;
+            let value = match value {
+                0x06054b50 => Self::EoCd,
+                0x02014b50 => Self::Directory,
+                0x04034b50 => Self::File,
+                _ => {
+                    let pos = reader.stream_position().await?;
+                    return Err(Error::BadMagic {
+                        pos,
+                        found: Box::new(format!("magic {} not match", value)),
+                    });
+                }
+            };
+            Ok(value)
+        }
+    }
+}
+impl BinWrite for Magic {
+    type Args<'a> = ();
+    fn write_options<W: Write + Seek + Send>(
+        &self,
+        writer: &mut W,
+        endian: Endian,
+        args: Self::Args<'_>,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            let value: u32 = match self {
+                Magic::EoCd => 0x06054b50,
+                Magic::Directory => 0x02014b50,
+                Magic::File => 0x04034b50,
+            };
+            writer.write_type_args(&value, endian, args).await?;
+            Ok(())
+        }
+    }
 }
 impl Default for Magic {
     fn default() -> Self {
@@ -59,14 +116,14 @@ impl Default for Magic {
 #[derive(Debug)]
 pub struct FastZip<T>
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
 {
     // #[br(calc = c.clone())]
     // #[bw(ignore)]
     pub config: T::Config,
     // #[bw(if(model == ZipModel::Bin))]
-    crc32_computer: Bool,
+    crc32_computer: bool,
     // #[br(parse_with = parse_eocd_offset,args(model.clone(),))]
     // #[bw(ignore)]
     pub eocd_offset: u64,
@@ -95,107 +152,116 @@ where
 }
 impl<T> BinWrite for FastZip<T>
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
 {
     type Args<'a> = &'a ZipModel;
 
-    fn write_options<W: Write + Seek>(
+    fn write_options<W: Write + Seek + Send>(
         &self,
         writer: &mut W,
         _endian: Endian,
         args: Self::Args<'_>,
-    ) -> BinResult<()> {
-        let model = args;
-        writer.write_le(&0x04034b50_u32)?;
-        if *model == ZipModel::Bin {
-            writer.write_le(&self.crc32_computer)?;
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            let model = args;
+            writer.write_le(&0x04034b50_u32).await?;
+            if *model == ZipModel::Bin {
+                writer.write_le(&self.crc32_computer).await?;
+            }
+            if *model == ZipModel::Parse {
+                writer.write_le(&self.magic).await?;
+            }
+            writer.write_le(&self.number_of_disk).await?;
+            writer.write_le(&self.directory_starts).await?;
+            writer.write_le(&self.number_of_directory_disk).await?;
+            writer.write_le(&(self.directories.len() as u16)).await?;
+            writer.write_le(&self.size).await?;
+            writer.write_le(&self.offset).await?;
+            writer.write_le(&(self.comment.len() as u16)).await?;
+            writer.write_le(&self.comment).await?;
+            if *model == ZipModel::Bin {
+                writer.write_le_args(&self.directories, (model,)).await?;
+            }
+            Ok(())
         }
-        if *model == ZipModel::Parse {
-            writer.write_le(&self.magic)?;
-        }
-        writer.write_le(&self.number_of_disk)?;
-        writer.write_le(&self.directory_starts)?;
-        writer.write_le(&self.number_of_directory_disk)?;
-        writer.write_le(&(self.directories.len() as u16))?;
-        writer.write_le(&self.size)?;
-        writer.write_le(&self.offset)?;
-        writer.write_le(&(self.comment.len() as u16))?;
-        writer.write_le(&self.comment)?;
-        if *model == ZipModel::Bin {
-            writer.write_le_args(&self.directories, (model,))?;
-        }
-        Ok(())
     }
 }
+pub type ReadBytesFun<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a;
 impl<T> BinRead for FastZip<T>
 where
-    T: Read + Write + Seek + StreamDefault,
-    T::Config: Config + 'static,
+    T: Read + Write + Seek + Send + StreamDefault,
+    T::Config: Config + Sync + 'static,
 {
-    type Args<'a> = (&'a ZipModel, &'a T::Config, &'a mut dyn FnMut(u64));
+    type Args<'a> = (&'a ZipModel, &'a T::Config, &'a mut ReadBytesFun<'a>);
 
-    fn read_options<R: Read + Seek>(
+    fn read_options<R: Read + Seek + Send>(
         reader: &mut R,
         endian: Endian,
         args: Self::Args<'_>,
-    ) -> BinResult<Self> {
-        let (model, config, read_bytes) = args;
-        let magic: u32 = reader.read_le()?;
-        assert_eq!(magic, 0x04034b50_u32);
-        let crc32_computer = if *model == ZipModel::Bin {
-            reader.read_le::<Bool>()?
-        } else {
-            Bool { value: false }
-        };
-        let eocd_offset = parse_eocd_offset(reader, endian, (model.clone(),))?;
-        reader.seek(SeekFrom::End(-(eocd_offset as i64)))?;
-        let magic: Magic = reader.read_le()?;
-        let number_of_disk: u16 = reader.read_le()?;
-        let directory_starts: u16 = reader.read_le()?;
-        let number_of_directory_disk: u16 = reader.read_le()?;
-        // #[bw(calc = directories.len() as u16)]
-        let entries: u16 = reader.read_le()?;
-        let size: u32 = reader.read_le()?;
-        let offset: u32 = reader.read_le()?;
-        // #[bw(calc = comment.len() as u16)]
-        let comment_length: u16 = reader.read_le()?;
-        // #[br(count = comment_length)]
-        let comment: Vec<u8> = reader.read_le_args(VecArgs {
-            count: comment_length as usize,
-            inner: (),
-        })?;
-        if *model == ZipModel::Parse {
-            reader.seek(SeekFrom::Start(offset as u64))?;
+    ) -> impl Future<Output = BinResult<Self>> + Send
+    where
+        Self: Send,
+    {
+        async move {
+            let (model, config, read_bytes) = args;
+            let magic: u32 = reader.read_le().await?;
+            assert_eq!(magic, 0x04034b50_u32);
+            let crc32_computer = if *model == ZipModel::Bin {
+                reader.read_le::<bool>().await?
+            } else {
+                false
+            };
+            let eocd_offset = parse_eocd_offset(reader, endian, model).await?;
+            reader.seek(SeekFrom::End(-(eocd_offset as i64))).await?;
+            let magic: Magic = reader.read_le().await?;
+            let number_of_disk: u16 = reader.read_le().await?;
+            let directory_starts: u16 = reader.read_le().await?;
+            let number_of_directory_disk: u16 = reader.read_le().await?;
+            // #[bw(calc = directories.len() as u16)]
+            let entries: u16 = reader.read_le().await?;
+            let size: u32 = reader.read_le().await?;
+            let offset: u32 = reader.read_le().await?;
+            // #[bw(calc = comment.len() as u16)]
+            let comment_length: u16 = reader.read_le().await?;
+            // #[br(count = comment_length)]
+            let comment: Vec<u8> = reader.read_le_args(comment_length as usize).await?;
+            if *model == ZipModel::Parse {
+                reader.seek(SeekFrom::Start(offset as u64)).await?;
+            }
+            let directories: IndexDirectory<T> = reader
+                .read_le_args((model, config, entries, read_bytes))
+                .await?;
+            Ok(Self {
+                config: config.clone(),
+                crc32_computer,
+                eocd_offset,
+                magic,
+                number_of_disk,
+                directory_starts,
+                number_of_directory_disk,
+                entries,
+                size,
+                offset,
+                comment_length,
+                comment,
+                directories,
+            })
         }
-        let directories: IndexDirectory<T> =
-            reader.read_le_args((model, config, entries, read_bytes))?;
-        Ok(Self {
-            config: config.clone(),
-            crc32_computer,
-            eocd_offset,
-            magic,
-            number_of_disk,
-            directory_starts,
-            number_of_directory_disk,
-            entries,
-            size,
-            offset,
-            comment_length,
-            comment,
-            directories,
-        })
     }
 }
 #[derive(Debug)]
 pub struct IndexDirectory<T>(pub IndexMap<String, Directory<T>>)
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static;
 
 impl<T> DerefMut for IndexDirectory<T>
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -204,7 +270,7 @@ where
 }
 impl<T> Deref for IndexDirectory<T>
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
 {
     type Target = IndexMap<String, Directory<T>>;
@@ -215,55 +281,65 @@ where
 }
 impl<T> BinRead for IndexDirectory<T>
 where
-    T: Read + Write + Seek + StreamDefault,
-    T::Config: Config + 'static,
+    T: Read + Write + Seek + Send + StreamDefault,
+    T::Config: Config + Sync + 'static,
 {
-    type Args<'a> = (&'a ZipModel, &'a T::Config, u16, &'a mut dyn FnMut(u64));
+    type Args<'a> = (&'a ZipModel, &'a T::Config, u16, &'a mut ReadBytesFun<'a>);
 
-    fn read_options<R: Read + Seek>(
+    fn read_options<R: Read + Seek + Send>(
         reader: &mut R,
         endian: Endian,
         args: Self::Args<'_>,
-    ) -> BinResult<Self> {
-        let (model, config, count, read_bytes) = args;
-        let mut directories = IndexMap::new();
-        for index in 0..count {
-            let dir: Directory<T> =
-                Directory::read_options(reader, endian, (index, model, config, read_bytes))?;
-            let name =
-                String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Custom {
-                    pos: 0,
-                    err: Box::new(e),
-                })?;
-            directories.insert(name, dir);
+    ) -> impl Future<Output = BinResult<Self>> + Send
+    where
+        Self: Send,
+    {
+        async move {
+            let (model, config, count, read_bytes) = args;
+            let mut directories = IndexMap::new();
+            for index in 0..count {
+                let dir: Directory<T> =
+                    Directory::read_options(reader, endian, (index, model, config, read_bytes))
+                        .await?;
+                let name =
+                    String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Custom {
+                        pos: 0,
+                        err: Box::new(e),
+                    })?;
+                directories.insert(name, dir);
+            }
+            Ok(IndexDirectory(directories))
         }
-        Ok(IndexDirectory(directories))
     }
 }
 impl<T> BinWrite for IndexDirectory<T>
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
 {
     type Args<'a> = (&'a ZipModel,);
 
-    fn write_options<W: Write + Seek>(
+    fn write_options<W: Write + Seek + Send>(
         &self,
         writer: &mut W,
         endian: Endian,
         args: Self::Args<'_>,
-    ) -> BinResult<()> {
-        let (model,) = args;
-        for (_, v) in &self.0 {
-            v.write_options(writer, endian, (model,))?;
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            let (model,) = args;
+            for (_, v) in &self.0 {
+                v.write_options(writer, endian, (model,)).await?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 impl<T> FastZip<T>
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
     // <T::Config as Config>::Value: Display + Default + Clone,
 {
@@ -276,7 +352,7 @@ where
 }
 impl<T> FastZip<T>
 where
-    T: Read + Write + Seek + StreamDefault,
+    T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
     // <T::Config as Config>::Value: Display + Default + Clone,
 {
@@ -297,21 +373,29 @@ where
             directories: IndexDirectory(IndexMap::new()),
         })
     }
-    pub fn parse(reader: &mut T) -> BinResult<FastZip<T>> {
-        let config = reader.config().clone();
-        FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut |_bytes| {}))
+    pub fn parse(reader: &mut T) -> impl Future<Output = BinResult<FastZip<T>>> + Send {
+        async move {
+            let config = reader.config().clone();
+            FastZip::read_le_args(
+                reader,
+                (&ZipModel::Parse, &config, &mut |_bytes| Box::pin(async {})),
+            )
+            .await
+        }
     }
     pub fn parse_with_callback(
         reader: &mut T,
-        callback: impl FnMut(u64, u64, String),
-    ) -> BinResult<FastZip<T>> {
-        let config = reader.config().clone();
-        let pos = reader.stream_position()?;
-        let total = reader.seek(SeekFrom::End(0))?;
-        reader.seek(SeekFrom::Start(pos))?;
-        let mut sum = 0;
-        let mut callback = Self::create_adapter(total, &mut sum, callback);
-        FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut callback))
+        callback: impl FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+    ) -> impl Future<Output = BinResult<FastZip<T>>> + Send {
+        async move {
+            let config = reader.config().clone();
+            let pos = reader.stream_position().await?;
+            let total = reader.seek(SeekFrom::End(0)).await?;
+            reader.seek(SeekFrom::Start(pos)).await?;
+            let mut sum = 0;
+            let mut callback = Self::create_adapter(total, &mut sum, callback);
+            FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut callback)).await
+        }
     }
     // pub fn parse_from_config<R: Read + Seek>(
     //     reader: &mut R,
@@ -322,13 +406,24 @@ where
     pub fn remove_file(&mut self, file_name: &str) {
         self.directories.swap_remove(file_name);
     }
-    pub fn save_file(&mut self, mut data: T, file_name: &str) -> BinResult<()> {
-        data.seek(SeekFrom::Start(0))?;
-        if let Some(dir) = self.directories.get_mut(file_name) {
-            return dir.put_data(data);
+    pub fn save_file(
+        &mut self,
+        data: Arc<async_lock::Mutex<Option<T>>>,
+        file_name: &str,
+    ) -> impl Future<Output = BinResult<()>> + Send {
+        async move {
+            let mut data = data.lock().await.take().ok_or(Error::AssertFail {
+                pos: 0,
+                message: "data can't not none".to_string(),
+            })?;
+            data.seek(SeekFrom::Start(0)).await?;
+            if let Some(dir) = self.directories.get_mut(file_name) {
+                return dir.put_data(data).await;
+            }
+            self.add_file(Arc::new(async_lock::Mutex::new(Some(data))), file_name)
+                .await?;
+            Ok(())
         }
-        self.add_file(data, file_name)?;
-        Ok(())
     }
     pub fn add_directory(&mut self, mut dir: Directory<T>) -> BinResult<()> {
         if dir.file_name.inner != dir.file.file_name.inner {
@@ -353,58 +448,51 @@ where
         let ratio = non_text_count as f32 / data.len() as f32;
         ratio > bin_threshold
     }
-    pub fn add_file(&mut self, mut data: T, file_name: &str) -> BinResult<()> {
-        data.seek(SeekFrom::Start(0))?;
-        let length = stream_length(&mut data)?;
-        let uncompressed_size = length as u32;
-        let crc_32_uncompressed_data = 0; //data.crc32_value();
-        let compressed_size = uncompressed_size; //data.compress(CompressionLevel::DefaultLevel)? as u32;
+    pub fn add_file(
+        &mut self,
+        data: Arc<async_lock::Mutex<Option<T>>>,
+        file_name: &str,
+    ) -> impl Future<Output = BinResult<()>> + Send {
+        async move {
+            let mut data = data.lock().await.take().ok_or(Error::AssertFail {
+                pos: 0,
+                message: "data can't not none".to_string(),
+            })?;
+            data.seek(SeekFrom::Start(0)).await?;
+            let length = stream_length(&mut data).await?;
+            let uncompressed_size = length as u32;
+            let crc_32_uncompressed_data = 0; //data.crc32_value();
+            let compressed_size = uncompressed_size; //data.compress(CompressionLevel::DefaultLevel)? as u32;
 
-        let mut buffer = vec![0u8; std::cmp::min(compressed_size as usize, 1024)];
-        data.read_exact(&mut buffer)?;
-        data.seek(SeekFrom::Start(0))?;
-        let internal_file_attributes = if Self::is_binary(&buffer) { 0 } else { 1 };
+            let mut buffer = vec![0u8; std::cmp::min(compressed_size as usize, 1024)];
+            data.read_exact(&mut buffer).await?;
+            data.seek(SeekFrom::Start(0)).await?;
+            let internal_file_attributes = if Self::is_binary(&buffer) { 0 } else { 1 };
 
-        let file_name = Name {
-            inner: file_name.as_bytes().to_vec(),
-        };
-        let extra_fields: ExtraList = vec![].into();
-        //     vec![
-        //     Extra::UnixExtendedTimestamp {
-        //         mtime: Some(1736154637),
-        //         atime: Some(1736195293),
-        //         ctime: None,
-        //     },
-        //     Extra::UnixAttrs { uid: 503, gid: 20 },
-        // ]
-        // .into();
-        // let mut ext_bytes = Cursor::new(vec![]);
-        // ext_bytes.write_le(&extra_fields)?;
-        // let extra_field_length = ext_bytes.get_ref().len() as u16;
-        let directory = Directory {
-            // _config: PhantomData,
-            compressed: false.into(),
-            data: RefCell::new(data),
-            created_zip_spec: 0x1E, //3.0
-            created_os: 0x03,       //Uninx
-            extract_zip_spec: 0x0E, //2.0
-            extract_os: 0,          //MS-DOS
-            compression_method: CompressionMethod::Deflate,
-            last_modification_time: 39620,
-            last_modification_date: 23170,
-            crc_32_uncompressed_data,
-            compressed_size,
-            uncompressed_size,
-            // extra_field_length,
-            number_of_starts: 0,
-            internal_file_attributes,
-            // external_file_attributes: 2175008768,
-            offset_of_local_file_header: 0,
-            file_name: file_name.clone(),
-            extra_fields: extra_fields.clone(),
-            file_comment: vec![],
-            file: ZipFile {
-                extract_os: 0, //MS-DOS
+            let file_name = Name {
+                inner: file_name.as_bytes().to_vec(),
+            };
+            let extra_fields: ExtraList = vec![].into();
+            //     vec![
+            //     Extra::UnixExtendedTimestamp {
+            //         mtime: Some(1736154637),
+            //         atime: Some(1736195293),
+            //         ctime: None,
+            //     },
+            //     Extra::UnixAttrs { uid: 503, gid: 20 },
+            // ]
+            // .into();
+            // let mut ext_bytes = Cursor::new(vec![]);
+            // ext_bytes.write_le(&extra_fields)?;
+            // let extra_field_length = ext_bytes.get_ref().len() as u16;
+            let directory = Directory {
+                // _config: PhantomData,
+                compressed: false,
+                data: Arc::new(async_lock::Mutex::new(Some(data))),
+                created_zip_spec: 0x1E, //3.0
+                created_os: 0x03,       //Uninx
+                extract_zip_spec: 0x0E, //2.0
+                extract_os: 0,          //MS-DOS
                 compression_method: CompressionMethod::Deflate,
                 last_modification_time: 39620,
                 last_modification_date: 23170,
@@ -412,174 +500,246 @@ where
                 compressed_size,
                 uncompressed_size,
                 // extra_field_length,
+                number_of_starts: 0,
+                internal_file_attributes,
+                // external_file_attributes: 2175008768,
+                offset_of_local_file_header: 0,
                 file_name: file_name.clone(),
-                extra_fields,
-                data_position: 0,
-            },
-        };
-        let name =
-            String::from_utf8(directory.file_name.inner.clone()).map_err(|e| Error::Custom {
-                pos: 0,
-                err: Box::new(e),
+                extra_fields: extra_fields.clone(),
+                file_comment: vec![],
+                file: ZipFile {
+                    extract_zip_spec: 0,
+                    extract_os: 0, //MS-DOS
+                    compression_method: CompressionMethod::Deflate,
+                    last_modification_time: 39620,
+                    last_modification_date: 23170,
+                    crc_32_uncompressed_data,
+                    compressed_size,
+                    uncompressed_size,
+                    // extra_field_length,
+                    file_name_length: 0,
+                    extra_field_length: 0,
+                    file_name: file_name.clone(),
+                    extra_fields,
+                    data_position: 0,
+                },
+            };
+            let name = String::from_utf8(directory.file_name.inner.clone()).map_err(|e| {
+                Error::Custom {
+                    pos: 0,
+                    err: Box::new(e),
+                }
             })?;
-        self.directories.insert(name, directory);
-        Ok(())
+            self.directories.insert(name, directory);
+            Ok(())
+        }
     }
-    fn create_adapter<F: FnMut(u64, u64, String)>(
+    fn create_adapter<'a, CB>(
         total: u64,
-        sum: &mut u64,
-        mut f: F,
-    ) -> impl FnMut(u64) {
+        sum: &'a mut u64,
+        mut cb: CB,
+    ) -> impl FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a
+    where
+        CB: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a,
+    {
         move |bytes| {
             *sum += bytes;
-            f(
-                total,
-                *sum,
-                format!("{:.2}%", (*sum as f64 / total as f64) * 100.0),
-            )
+            cb(total, *sum)
         }
     }
-    fn computer_un_compress_size(&mut self) -> BinResult<u64> {
-        let mut total_size = 0;
-        for (_, director) in &mut self.directories.0 {
-            total_size += if !director.compressed.value
-                && director.compression_method == CompressionMethod::Deflate
-            {
-                stream_length(&mut *director.data.borrow_mut())?
-            } else {
-                0
+    fn computer_un_compress_size(&mut self) -> impl Future<Output = BinResult<u64>> + Send {
+        async move {
+            let mut total_size = 0;
+            for (_, director) in &mut self.directories.0 {
+                total_size += if !director.compressed
+                    && director.compression_method == CompressionMethod::Deflate
+                {
+                    let mut data = director.data.lock().await;
+                    if let Some(data) = &mut *data {
+                        stream_length(data).await?
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
             }
+            Ok(total_size)
         }
-        Ok(total_size)
     }
-    pub fn to_bin<W: Write + Seek>(&self, writer: &mut W) -> BinResult<()> {
-        self.write_le_args(writer, &ZipModel::Bin)?;
-        Ok(())
+    pub fn to_bin<W: Write + Seek + Send>(
+        &self,
+        writer: &mut W,
+    ) -> impl Future<Output = BinResult<()>> + Send {
+        async move {
+            self.write_le_args(writer, &ZipModel::Bin).await?;
+            Ok(())
+        }
     }
-    pub fn from_bin<R: Read + Seek>(reader: &mut R) -> BinResult<Self> {
-        reader.seek(SeekFrom::Start(0))?;
-        FastZip::read_le_args(
-            reader,
-            (&ZipModel::Bin, &T::Config::default(), &mut |_bytes| {}),
-        )
+    pub fn from_bin<R: Read + Seek + Send>(
+        reader: &mut R,
+    ) -> impl Future<Output = BinResult<Self>> + Send {
+        async move {
+            reader.seek(SeekFrom::Start(0)).await?;
+            FastZip::read_le_args(
+                reader,
+                (&ZipModel::Bin, &T::Config::default(), &mut |_bytes| {
+                    Box::pin(async {})
+                }),
+            )
+            .await
+        }
     }
     pub fn package(
         &mut self,
         writer: &mut T,
         compression_level: CompressionLevel,
-    ) -> BinResult<()> {
-        self.package_with_callback(writer, compression_level, &mut |_total, _size, _format| {})
+    ) -> impl Future<Output = BinResult<()>> + Send {
+        async move {
+            self.package_with_callback(
+                writer,
+                compression_level,
+                |_total, _size| Box::pin(async {}),
+            )
+            .await
+        }
     }
-    pub fn package_with_callback(
+    pub fn package_with_callback<F>(
         &mut self,
         writer: &mut T,
         compression_level: CompressionLevel,
-        callback: &mut impl FnMut(u64, u64, String),
-    ) -> BinResult<()> {
-        let mut header = T::from_config(writer.config())?;
-        let mut files_size = 0;
-        let mut directors_size = 0;
-        let mut binding = 0;
-        let total_size = self.computer_un_compress_size()?;
-        let mut callback = Self::create_adapter(total_size, &mut binding, callback);
-        let crc32_computer = self.crc32_computer.value;
-        for (_, director) in &mut self.directories.0 {
-            director.compress_callback(
-                writer.config(),
-                crc32_computer,
-                &compression_level,
-                &mut callback,
-            )?;
+        callback: F,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+    {
+        async move {
+            let mut header = T::from_config(writer.config()).await?;
+            let mut files_size = 0;
+            let mut directors_size = 0;
+            let mut binding = 0;
+            let total_size = self.computer_un_compress_size().await?;
+            let mut callback = Self::create_adapter(total_size, &mut binding, callback);
+            let crc32_computer = self.crc32_computer;
+            for (_, director) in &mut self.directories.0 {
+                director
+                    .compress_callback(
+                        writer.config(),
+                        crc32_computer,
+                        compression_level,
+                        &mut callback,
+                    )
+                    .await?;
 
-            director.offset_of_local_file_header = files_size as u32;
-            let mut directory_writer = writer.from()?;
-            directory_writer.write_le_args(director, (&ZipModel::Package,))?;
-            directory_writer.seek(SeekFrom::Start(0))?;
-            directors_size += std::io::copy(&mut directory_writer, &mut header)?;
+                director.offset_of_local_file_header = files_size as u32;
+                let mut directory_writer = writer.from().await?;
+                directory_writer
+                    .write_le_args(director, (&ZipModel::Package,))
+                    .await?;
+                directory_writer.seek(SeekFrom::Start(0)).await?;
+                directors_size += binrw::io::copy(&mut directory_writer, &mut header).await?;
 
-            let mut file_writer = writer.from()?; // T::from_config(config)?;
-            let file = &director.file;
-            file_writer.write_le_args(&file, (&ZipModel::Package, director.uncompressed_size))?;
-            file_writer.seek(SeekFrom::Start(0))?;
-            let file_writer_length = std::io::copy(&mut file_writer, writer)?;
+                let mut file_writer = writer.from().await?; // T::from_config(config)?;
+                let file = &director.file;
+                file_writer
+                    .write_le_args(&file, (&ZipModel::Package, director.uncompressed_size))
+                    .await?;
+                file_writer.seek(SeekFrom::Start(0)).await?;
+                let file_writer_length = binrw::io::copy(&mut file_writer, writer).await?;
 
-            let file_data_length = if !director.file_name.inner.ends_with(&[b'/']) {
-                let mut data = director.data.borrow_mut();
-                data.seek(SeekFrom::Start(0))?;
-                std::io::copy(&mut *data, writer)?
-            } else {
-                0
-            };
-            files_size += file_writer_length + file_data_length;
+                let file_data_length = if !director.file_name.inner.ends_with(&[b'/']) {
+                    let mut data = director.data.lock().await;
+                    if let Some(data) = &mut *data {
+                        data.seek(SeekFrom::Start(0)).await?;
+                        binrw::io::copy(data, writer).await?
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                files_size += file_writer_length + file_data_length;
+            }
+            header.seek(SeekFrom::Start(0)).await?;
+            binrw::io::copy(&mut header, writer).await?;
+            self.size = directors_size as u32;
+            self.entries = self.directories.len() as u16;
+            self.number_of_directory_disk = self.directories.len() as u16;
+            self.offset = files_size as u32;
+            self.write_eocd(writer).await?;
+            writer.seek(SeekFrom::Start(0)).await?;
+            Ok(())
         }
-        header.seek(SeekFrom::Start(0))?;
-        std::io::copy(&mut header, writer)?;
-        self.size = directors_size as u32;
-        // self.entries = self.directories.len() as u16;
-        self.number_of_directory_disk = self.directories.len() as u16;
-        self.offset = files_size as u32;
-        self.write_eocd(writer)?;
-        writer.seek(SeekFrom::Start(0))?;
-        Ok(())
     }
-    fn write_eocd<R: Write + Seek>(&mut self, writer: &mut R) -> BinResult<()> {
-        writer.write_le(&self.magic)?;
-        writer.write_le(&self.number_of_disk)?;
-        writer.write_le(&self.directory_starts)?;
-        writer.write_le(&self.number_of_directory_disk)?;
-        writer.write_le(&(self.directories.len() as u16))?;
-        writer.write_le(&self.size)?;
-        writer.write_le(&self.offset)?;
-        writer.write_le(&(self.comment.len() as u16))?;
-        writer.write_all(&self.comment)?;
-        Ok(())
+    fn write_eocd<R: Write + Seek + Send>(
+        &mut self,
+        writer: &mut R,
+    ) -> impl Future<Output = BinResult<()>> + Send {
+        async move {
+            writer.write_le(&self.magic).await?;
+            writer.write_le(&self.number_of_disk).await?;
+            writer.write_le(&self.directory_starts).await?;
+            writer.write_le(&self.number_of_directory_disk).await?;
+            writer.write_le(&(self.directories.len() as u16)).await?;
+            writer.write_le(&self.size).await?;
+            writer.write_le(&self.offset).await?;
+            writer.write_le(&(self.comment.len() as u16)).await?;
+            writer.write_all(&self.comment).await?;
+            Ok(())
+        }
     }
 }
 
-#[binrw::parser(reader, endian)]
-pub fn parse_eocd_offset(model: ZipModel) -> BinResult<u64> {
-    if model == ZipModel::Bin {
-        return Ok(0);
-    }
-    let max_eocd_size: u64 = u16::MAX as u64 + 22;
-    let mut search_size: u64 = 22; //最快的搜索
-    let file_size = stream_length(reader)?;
-    let pos = reader.stream_position()?;
+// #[binrw::parser(reader, endian)]
+pub fn parse_eocd_offset<R: Read + Seek + Send>(
+    reader: &mut R,
+    endian: Endian,
+    model: &ZipModel,
+) -> impl Future<Output = BinResult<u64>> + Send {
+    async move {
+        if *model == ZipModel::Bin {
+            return Ok(0);
+        }
+        let max_eocd_size: u64 = u16::MAX as u64 + 22;
+        let mut search_size: u64 = 22; //最快的搜索
+        let file_size = stream_length(reader).await?;
+        let pos = reader.stream_position().await?;
 
-    if file_size < search_size {
-        return Err(Error::BadMagic {
-            pos,
-            found: Box::new("file size le search size, not a zip file"),
-        });
-    }
-    // let eocd_magic: u32 = Magic::EoCd.into();
-    loop {
-        // 确保搜索范围不超过 EOCD 的最大大小
-        search_size = search_size.min(max_eocd_size);
-        reader.seek(SeekFrom::End(-(search_size as i64)))?;
-        for i in 0..search_size - 3 {
-            let pos = reader.stream_position()?;
-            // stream.pin()?;
-            // let magic: u32 = stream.read_value()?;
-            let magic: u32 = BinRead::read_options(reader, endian, ())?;
-            reader.seek(SeekFrom::Start(pos))?;
-            reader.seek(SeekFrom::Current(1))?;
-            // stream.un_pin()?;
-            // stream.seek(SeekFrom::Current(1))?;
-            if magic == 0x06054b50_u32 {
-                return Ok(search_size - i);
+        if file_size < search_size {
+            return Err(Error::BadMagic {
+                pos,
+                found: Box::new("file size le search size, not a zip file"),
+            });
+        }
+        // let eocd_magic: u32 = Magic::EoCd.into();
+        loop {
+            // 确保搜索范围不超过 EOCD 的最大大小
+            search_size = search_size.min(max_eocd_size);
+            reader.seek(SeekFrom::End(-(search_size as i64))).await?;
+            for i in 0..search_size - 3 {
+                let pos = reader.stream_position().await?;
+                // stream.pin()?;
+                // let magic: u32 = stream.read_value()?;
+                let magic: u32 = reader.read_type(endian).await?;
+                reader.seek(SeekFrom::Start(pos)).await?;
+                reader.seek(SeekFrom::Current(1)).await?;
+                // stream.un_pin()?;
+                // stream.seek(SeekFrom::Current(1))?;
+                if magic == 0x06054b50_u32 {
+                    return Ok(search_size - i);
+                }
+                if search_size <= 22 {
+                    break;
+                }
             }
-            if search_size <= 22 {
+            if search_size >= max_eocd_size {
                 break;
             }
+            search_size = (search_size * 2).min(file_size);
         }
-        if search_size >= max_eocd_size {
-            break;
-        }
-        search_size = (search_size * 2).min(file_size);
+        Err(Error::BadMagic {
+            pos,
+            found: Box::new("not a zip file"),
+        })
     }
-    Err(Error::BadMagic {
-        pos,
-        found: Box::new("not a zip file"),
-    })
 }

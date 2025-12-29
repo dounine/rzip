@@ -1,3 +1,5 @@
 target
 data
 .idea/
+.DS_Store
+Cargo.lock

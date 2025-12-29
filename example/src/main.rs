@@ -1,10 +1,13 @@
 use binrw::BinResult;
+use binrw::io::read::Read;
+use binrw::io::seek::Seek;
+use binrw::io::write::Write;
 use fast_zip::CompressionLevel;
 use fast_zip::zip::{Config, FastZip, StreamDefault};
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, SeekFrom};
 use std::time::Instant;
 
 pub enum MyData {
@@ -72,40 +75,48 @@ impl Config for MyStreamConfig {
 impl StreamDefault for MyData {
     type Config = MyStreamConfig;
 
-    fn from(&self) -> BinResult<Self> {
-        MyData::from_config(self.config())
-    }
-
-    fn from_config(config: &Self::Config) -> BinResult<Self> {
-        if let (Some(size), Some(limit_size)) = (config.compress_size, config.limit_size) {
-            if size > limit_size {
-                let tempfile = tempfile::tempfile()?;
-                return Ok(Self::File {
-                    inner: tempfile.into(),
-                    config: config.clone(),
-                });
-            }
-        }
-        if let (Some(size), Some(limit_size)) = (config.un_compress_size, config.limit_size) {
-            if size > limit_size {
-                let tempfile = tempfile::tempfile()?;
-                return Ok(Self::File {
-                    inner: tempfile.into(),
-                    config: config.clone(),
-                });
-            }
-        }
-        Ok(Self::Mem {
-            inner: Cursor::new(vec![]),
-            config: config.clone(),
-        })
-    }
+    // fn from(&self) ->impl Future<Output=BinResult<Self>> + Send {
+    //     async move{
+    //         MyData::from_config(self.config())
+    //     }
+    // }
 
     fn config(&self) -> &Self::Config {
         match self {
             MyData::File { config, .. } => config,
             MyData::Mem { config, .. } => config,
         }
+    }
+
+    fn from_config(config: &Self::Config) -> impl Future<Output = BinResult<Self>> + Send {
+        async move {
+            if let (Some(size), Some(limit_size)) = (config.compress_size, config.limit_size) {
+                if size > limit_size {
+                    let tempfile = tempfile::tempfile()?;
+                    return Ok(Self::File {
+                        inner: tempfile.into(),
+                        config: config.clone(),
+                    });
+                }
+            }
+            if let (Some(size), Some(limit_size)) = (config.un_compress_size, config.limit_size) {
+                if size > limit_size {
+                    let tempfile = tempfile::tempfile()?;
+                    return Ok(Self::File {
+                        inner: tempfile.into(),
+                        config: config.clone(),
+                    });
+                }
+            }
+            Ok(Self::Mem {
+                inner: Cursor::new(vec![]),
+                config: config.clone(),
+            })
+        }
+    }
+
+    fn from(&self) -> impl Future<Output = BinResult<Self>> + Send {
+        MyData::from_config(self.config())
     }
 }
 impl Default for MyData {
@@ -117,43 +128,65 @@ impl Default for MyData {
     }
 }
 impl Read for MyData {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            MyData::File { inner, .. } => inner.read(buf),
-            MyData::Mem { inner, .. } => inner.read(buf),
+            MyData::File { inner, .. } => {
+                let value = std::io::Read::read(inner, buf);
+                value
+            }
+            MyData::Mem { inner, .. } => {
+                let pos = std::io::Read::read(inner, buf)?;
+                Ok(pos)
+            }
         }
+    }
+    // async fn read(&mut self, buf: &mut [u8]) -> std::io::Error<usize> {
+    //     use std::io::Read;
+    //     match self {
+    //         MyData::File { inner, .. } => {
+    //             let value = inner.read(buf).unwrap();
+    //             Ok(value)
+    //         },
+    //         MyData::Mem { inner, .. } => inner.read(buf),
+    //     }
+    // }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 impl Write for MyData {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    async fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
-            MyData::File { inner, .. } => inner.write(buf),
-            MyData::Mem { inner, .. } => inner.write(buf),
+            MyData::File { inner, .. } => std::io::Write::write(inner, buf),
+            MyData::Mem { inner, .. } => std::io::Write::write(inner, buf),
         }
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    async fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            MyData::File { inner, .. } => inner.flush(),
-            MyData::Mem { inner, .. } => inner.flush(),
+            MyData::File { inner, .. } => std::io::Write::flush(inner),
+            MyData::Mem { inner, .. } => std::io::Write::flush(inner),
         }
     }
 }
 impl Seek for MyData {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+    async fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        use std::io::Seek;
         match self {
             MyData::File { inner, .. } => inner.seek(pos),
-            MyData::Mem { inner, .. } => inner.seek(pos),
+            MyData::Mem { inner, .. } => std::io::Seek::seek(inner, pos),
         }
     }
 }
-
-fn main() {
-    let data = fs::File::open("./data/SideStore.ipa".to_string()).unwrap();
+#[tokio::main]
+async fn main() {
+    // let data = fs::File::open("./data/SideStore.ipa".to_string()).unwrap();
+    let data = fs::read("./data/fsign.ipa".to_string()).unwrap();
     // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
     let mut config = MyStreamConfig::default();
-    let mut data: MyData = MyData::File {
-        inner: data,
+    let mut data: MyData = MyData::Mem {
+        inner: Cursor::new(data),
         config: config.clone(),
     };
     // data.read_exact()
@@ -163,9 +196,13 @@ fn main() {
 
     config.limit_size = Some(1024 * 100);
     let mut zip_file: FastZip<MyData> =
-        FastZip::parse_with_callback(&mut data, &mut |total, sum, format| {
-            println!("process {}", format);
+        FastZip::parse_with_callback(&mut data, |total, sum| {
+            Box::pin(async move{
+                let format = format!("{:.2}%", (sum as f64 / total as f64) * 100.0);
+                println!("process {}", format);
+            })
         })
+        .await
         .unwrap();
     // for (key, dir) in &mut zip_file.directories.0 {
     //     if key == "Payload/SideStore.app/AppIcon60x60@2x.png" {
@@ -194,7 +231,7 @@ fn main() {
         inner: Cursor::new(vec![]),
         config,
     };
-    // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
+    // let mut data = std::fs::File::open("./data/fsign2.ipa".to_string()).unwrap();
     // zip_file
     //     .add_file(
     //         MyData::File(
@@ -235,21 +272,23 @@ fn main() {
     // // let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
     // let time = Instant::now();
     // // let config = StreamConfig::default();
-    // zip_file
-    //     .package(
-    //         &mut writer,
-    //         CompressionLevel::DefaultLevel,
-    //         // &mut |total, size, format| println!("write {}", format),
-    //     )
-    //     .unwrap();
+    zip_file
+        .package(
+            &mut writer,
+            CompressionLevel::DefaultLevel,
+            // &mut |total, size, format| println!("write {}", format),
+        )
+        .await
+        .unwrap();
+    writer.seek(SeekFrom::Start(0)).await.unwrap();
     // dbg!("压缩时长", time.elapsed());
-    // let mut file = OpenOptions::new()
-    //     .write(true)
-    //     .create(true)
-    //     .truncate(true)
-    //     .open("./data/hello2.zip".to_string())
-    //     .unwrap();
-    // std::io::copy(&mut writer, &mut file).unwrap();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open("./data/hello2.zip".to_string())
+        .unwrap();
+    binrw::io::copy(&mut writer, &mut file).await.unwrap();
     // file.write_all(&writer).unwrap();
     // dbg!(zip_file);
     // println!("Hello, world!");

@@ -9,7 +9,8 @@ exclude = ["example"]
 members = ["example", "."]
 
 [dependencies]
-binrw = "0.15.0"
+async-lock = "3.4.2"
+binrw = { path = "../binrw" }
 crc32fast = "1.5.0"
 indexmap = "2.12.1"
 sha1 = "0.10.6"
