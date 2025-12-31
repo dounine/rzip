@@ -275,18 +275,22 @@ async fn main() {
     // let time = Instant::now();
     // // let config = StreamConfig::default();
     let time = Instant::now();
-    zip_file
-        .package(
-            &mut writer,
-            CompressionLevel::DefaultLevel,
-            // &mut |total, size, format| println!("write {}", format),
-        )
-        .await
-        .unwrap();
     // zip_file
-    // .package_parallel(&mut writer, CompressionLevel::DefaultLevel)
-    // .await
-    // .unwrap();
+    //     .package(
+    //         &mut writer,
+    //         CompressionLevel::DefaultLevel,
+    //         // &mut |total, size, format| println!("write {}", format),
+    //     )
+    //     .await
+    //     .unwrap();
+    zip_file
+    .package_parallel(&mut writer, CompressionLevel::DefaultLevel,|total,bytes|{
+        Box::pin(async move {
+            // println!("{:.2}%", (bytes as f64 / total as f64) * 100.0)
+        })
+    })
+    .await
+    .unwrap();
     writer.seek(SeekFrom::Start(0)).await.unwrap();
     dbg!("压缩时长", time.elapsed());
     let mut file = OpenOptions::new()

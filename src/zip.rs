@@ -296,7 +296,7 @@ where
     {
         async move {
             let (model, config, count, read_bytes) = args;
-            let mut directories = IndexMap::new();
+            let mut directories = IndexMap::with_capacity(count as usize);
             for index in 0..count {
                 let dir: Directory<T> =
                     Directory::read_options(reader, endian, (index, model, config, read_bytes))
@@ -607,37 +607,72 @@ where
     }
 
     #[cfg(feature = "parallel")]
-    pub fn package_parallel(
-        &mut self,
-        writer: &mut T,
+    pub fn package_parallel<'a,'c:'a, F>(
+        &'a mut self,
+        writer: &'c mut T,
         compression_level: CompressionLevel,
-    ) -> impl Future<Output = BinResult<()>> + Send
+        mut callback: F,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'a
     where
         T: 'static,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a,
     {
+        use tokio::sync::mpsc;
         use tokio::task::JoinSet;
         async move {
+            let total_size = self.computer_un_compress_size().await?;
+
             let cfg = writer.config().clone();
             let crc32 = self.crc32_computer;
             let directories = std::mem::take(&mut self.directories.0);
 
+            let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
+
+            // 将 callback 运行在当前协程中，而不是 spawn 出去
+            // 这样 callback 就不需要 'static 生命周期
+            let monitor_future = async {
+                let mut processed = 0;
+                while let Some(bytes) = rx.recv().await {
+                    processed += bytes;
+                    callback(total_size, processed).await;
+                }
+            };
+
             let mut set = JoinSet::new();
             for (index, (name, mut dir)) in directories.into_iter().enumerate() {
                 let cfg = cfg.clone();
+                let tx = tx.clone();
                 set.spawn(async move {
-                    dir.compress(&cfg, crc32, compression_level).await?;
+                    dir.compress_callback(&cfg, crc32, compression_level, &mut |bytes| {
+                        let tx = tx.clone();
+                        Box::pin(async move {
+                            let _ = tx.send(bytes);
+                        })
+                    })
+                    .await?;
                     Ok::<(usize, String, Directory<T>), binrw::Error>((index, name, dir))
                 });
             }
+            drop(tx); // 必须在主协程中 drop tx，否则 rx 永远不会结束
 
-            let mut results = Vec::new();
-            while let Some(res) = set.join_next().await {
-                let (index, name, dir) = res.map_err(|e| binrw::Error::Custom {
-                    pos: 0,
-                    err: Box::new(e),
-                })??;
-                results.push((index, name, dir));
-            }
+            // 使用 tokio::join! 同时运行监控任务和并行压缩任务
+            // 但这里有个问题：set.join_next() 需要循环调用
+            // 所以我们需要把 monitor_future 和 set 的结果收集过程并发运行
+
+            let collect_future = async {
+                let mut results = Vec::new();
+                while let Some(res) = set.join_next().await {
+                    let (index, name, dir) = res.map_err(|e| binrw::Error::Custom {
+                        pos: 0,
+                        err: Box::new(e),
+                    })??;
+                    results.push((index, name, dir));
+                }
+                Ok::<_, binrw::Error>(results)
+            };
+
+            let (_, results) = tokio::join!(monitor_future, collect_future);
+            let mut results: Vec<(usize, String, Directory<T>)> = results?;
 
             results.sort_by_key(|(index, _, _)| *index);
 
