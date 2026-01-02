@@ -1,5 +1,5 @@
 use binrw::BinResult;
-use binrw::io::read::Read;
+use binrw::io::read::{Read, ReadAt};
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
 use fast_zip::CompressionLevel;
@@ -8,7 +8,9 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, SeekFrom};
+use std::sync::Arc;
 use std::time::Instant;
+
 
 pub enum MyData {
     File {
@@ -19,6 +21,13 @@ pub enum MyData {
         inner: Cursor<Vec<u8>>,
         config: MyStreamConfig,
     },
+    Shared {
+        inner: Arc<dyn ReadAt>,
+        offset: u64,
+        pos: u64,
+        size: u64,
+        config: MyStreamConfig,
+    },
 }
 #[derive(Default, Clone)]
 pub struct MyStreamConfig {
@@ -27,6 +36,7 @@ pub struct MyStreamConfig {
     pub compress_size: Option<u64>,
     pub un_compress_size: Option<u64>,
     pub open_files: u16,
+    pub source: Option<Arc<dyn ReadAt>>,
 }
 impl Display for MyStreamConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -85,17 +95,20 @@ impl StreamDefault for MyData {
         match self {
             MyData::File { config, .. } => config,
             MyData::Mem { config, .. } => config,
+            MyData::Shared { config, .. } => config,
         }
     }
 
     fn from_config(config: &Self::Config) -> impl Future<Output = BinResult<Self>> + Send {
         async move {
+            let mut config = config.clone();
+            config.source = None;
             if let (Some(size), Some(limit_size)) = (config.compress_size, config.limit_size) {
                 if size > limit_size {
                     let tempfile = tempfile::tempfile()?;
                     return Ok(Self::File {
                         inner: tempfile.into(),
-                        config: config.clone(),
+                        config,
                     });
                 }
             }
@@ -104,14 +117,38 @@ impl StreamDefault for MyData {
                     let tempfile = tempfile::tempfile()?;
                     return Ok(Self::File {
                         inner: tempfile.into(),
-                        config: config.clone(),
+                        config,
                     });
                 }
             }
             Ok(Self::Mem {
                 inner: Cursor::new(vec![]),
-                config: config.clone(),
+                config,
             })
+        }
+    }
+
+    fn from_link_config(
+        pos: u64,
+        size: u64,
+        config: &Self::Config,
+    ) -> impl Future<Output = BinResult<(Self, bool)>> + Send {
+        async move {
+            if let Some(source) = &config.source {
+                Ok((
+                    MyData::Shared {
+                        inner: source.clone(),
+                        offset: pos,
+                        pos: 0,
+                        size,
+                        config: config.clone(),
+                    },
+                    false, // false 表示不需要拷贝
+                ))
+            } else {
+                let data = Self::from_config(config).await?;
+                Ok((data, true))
+            }
         }
     }
 
@@ -138,6 +175,22 @@ impl Read for MyData {
                 let pos = std::io::Read::read(inner, buf)?;
                 Ok(pos)
             }
+            MyData::Shared {
+                inner,
+                offset,
+                pos,
+                size,
+                ..
+            } => {
+                let remain_len = (*size - *pos) as usize;
+                let read_len = buf.len().min(remain_len);
+                if read_len == 0 {
+                    return Ok(0);
+                }
+                inner.read_at(&mut buf[..read_len], *offset + *pos)?;
+                *pos += read_len as u64;
+                Ok(read_len)
+            }
         }
     }
     // async fn read(&mut self, buf: &mut [u8]) -> std::io::Error<usize> {
@@ -160,6 +213,10 @@ impl Write for MyData {
         match self {
             MyData::File { inner, .. } => std::io::Write::write(inner, buf),
             MyData::Mem { inner, .. } => std::io::Write::write(inner, buf),
+            MyData::Shared { .. } => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Shared file is read-only",
+            )),
         }
     }
 
@@ -167,6 +224,7 @@ impl Write for MyData {
         match self {
             MyData::File { inner, .. } => std::io::Write::flush(inner),
             MyData::Mem { inner, .. } => std::io::Write::flush(inner),
+            MyData::Shared { .. } => Ok(()),
         }
     }
 }
@@ -176,17 +234,67 @@ impl Seek for MyData {
         match self {
             MyData::File { inner, .. } => inner.seek(pos),
             MyData::Mem { inner, .. } => std::io::Seek::seek(inner, pos),
+            MyData::Shared {
+                offset: _,
+                pos: current_pos,
+                size,
+                ..
+            } => {
+                let new_pos = match pos {
+                    SeekFrom::Start(p) => p,
+                    SeekFrom::End(p) => {
+                        if p < 0 {
+                            if let Some(res) = size.checked_sub((-p) as u64) {
+                                res
+                            } else {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "seek before start",
+                                ));
+                            }
+                        } else {
+                            *size + p as u64
+                        }
+                    }
+                    SeekFrom::Current(p) => {
+                        if p < 0 {
+                            if let Some(res) = current_pos.checked_sub((-p) as u64) {
+                                res
+                            } else {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "seek before start",
+                                ));
+                            }
+                        } else {
+                            *current_pos + p as u64
+                        }
+                    }
+                };
+                *current_pos = new_pos;
+                Ok(new_pos)
+            }
         }
     }
 }
 #[tokio::main]
 async fn main() {
-    // let data = fs::File::open("./data/SideStore.ipa".to_string()).unwrap();
-    let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
-    // let mut data = std::fs::File::open("./data/hello.zip".to_string()).unwrap();
+    let data = fs::File::open("./data/SideStore.ipa".to_string()).unwrap();
+    // let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
+    // let data = File::open("./data/SideStore.ipa").unwrap();
+    let source = Arc::new(data);
+    // let file_len =source.len() as u64;
+    let file_len = source.metadata().unwrap().len();
+
     let mut config = MyStreamConfig::default();
-    let mut data: MyData = MyData::Mem {
-        inner: Cursor::new(data),
+    config.source = Some(source.clone());
+    
+    // We start with a Shared view of the entire file
+    let mut data: MyData = MyData::Shared {
+        inner: source.clone(),
+        offset: 0,
+        pos: 0,
+        size: file_len,
         config: config.clone(),
     };
     // data.read_exact()
@@ -246,7 +354,7 @@ async fn main() {
     //         "Payload/MiniApp.app/Frameworks/MiniUiFramework.framework/Info.plist",
     //     )
     //     .unwrap();
-    // zip_file.disable_crc32_computer();
+    // zip_file.enable_crc32_computer();
     // let mut file = OpenOptions::new()
     //     .write(true)
     //     .create(true)
@@ -291,7 +399,7 @@ async fn main() {
     })
     .await
     .unwrap();
-    writer.seek(SeekFrom::Start(0)).await.unwrap();
+    writer.seek_start().await.unwrap();
     dbg!("压缩时长", time.elapsed());
     let mut file = OpenOptions::new()
         .write(true)

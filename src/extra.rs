@@ -161,7 +161,7 @@ impl BinRead for Extra {
                         u32::read_options(reader, endian, ()).await?;
                     }
                     if flags & 0xF8 != 0 {
-                        let pos = reader.stream_position().await?;
+                        let pos = reader.position().await?;
                         return Err(Error::BadMagic {
                             pos,
                             found: Box::new("Flags is invalid in ExtendedTimestamp"),
@@ -191,7 +191,7 @@ impl BinRead for Extra {
                     let tag: u16 = reader.read_type(endian).await?;
                     _length -= 2;
                     if tag != 0x0001 {
-                        let pos = reader.stream_position().await?;
+                        let pos = reader.position().await?;
                         return Err(Error::BadMagic {
                             pos,
                             found: Box::new("Tag is invalid in NtfsTimestamp"),
@@ -200,7 +200,7 @@ impl BinRead for Extra {
                     let size: u16 = reader.read_type(endian).await?;
                     _length -= 2;
                     if size != 24 {
-                        let pos = reader.stream_position().await?;
+                        let pos = reader.position().await?;
                         return Err(Error::BadMagic {
                             pos,
                             found: Box::new("Invalid NTFS Timestamps size"),
@@ -231,7 +231,7 @@ impl BinRead for Extra {
                     }
                 }
                 _ => {
-                    let pos = reader.stream_position().await?;
+                    let pos = reader.position().await?;
                     return Err(Error::BadMagic {
                         pos,
                         found: Box::new(format!("Extra id {} not match", id)),

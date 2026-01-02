@@ -1,5 +1,4 @@
 use crate::file::{ExtraList, ZipFile};
-use crate::util::stream_length;
 use crate::zip::{Config, ReadBytesFun, StreamDefault, ZipModel};
 use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
@@ -97,7 +96,7 @@ impl BinRead for CompressionMethod {
                 0x0063 => Self::AES,
                 _ => {
                     return Err(Error::Custom {
-                        pos: reader.stream_position().await?,
+                        pos: reader.position().await?,
                         err: Box::new(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "invalid compression method",
@@ -270,7 +269,7 @@ where
     {
         async move {
             let (_index, model, config, read_bytes) = args;
-            let pos = reader.stream_position().await?;
+            let pos = reader.position().await?;
             let magic: u32 = reader.read_le().await?;
             assert_eq!(magic, 0x02014b50_u32);
             let created_zip_spec: u8 = reader.read_le().await?;
@@ -304,23 +303,23 @@ where
                 uncompressed_size,
             )
             .await?;
-            read_bytes(reader.stream_position().await? - pos).await;
+            read_bytes(reader.position().await? - pos).await;
             // reader.seek(SeekFrom::Start(pos))?;
             let data = if !Self::is_file(&file_name) {
                 T::from_config(config).await?
             } else {
-                let pos = reader.stream_position().await?;
+                let pos = reader.position().await?;
                 if *model == ZipModel::Parse {
-                    reader.seek(SeekFrom::Start(file.data_position)).await?;
+                    reader.set_position(file.data_position).await?;
                 }
-                let config_pos = reader.stream_position().await?;
-                let mut take_reader = reader.take(compressed_size as u64);
+                let config_pos = reader.position().await?;
                 // let mut config = config.clone();
                 // config.compress_size_mut(compressed_size as u64);
                 // config.un_compress_size_mut(uncompressed_size as u64);
                 let (mut data, need_copy) =
-                    T::from_ref_config(config_pos, compressed_size as u64, config).await?;
+                    T::from_link_config(config_pos, compressed_size as u64, config).await?;
                 if need_copy {
+                    let mut take_reader = reader.take(compressed_size as u64);
                     let mut buffer = vec![0u8; 1024 * 8];
                     loop {
                         let len = take_reader.read(&mut buffer).await?;
@@ -331,11 +330,12 @@ where
                         read_bytes(len as u64).await;
                     }
                 } else {
+                    reader.seek_relative(compressed_size as i64).await?;
                     read_bytes(compressed_size as u64).await;
                 }
-                data.seek(SeekFrom::Start(0)).await?;
+                data.seek_start().await?;
                 if *model == ZipModel::Parse {
-                    reader.seek(SeekFrom::Start(pos)).await?;
+                    reader.set_position(pos).await?;
                 }
                 data
             };
@@ -528,9 +528,9 @@ where
         if !is_file {
             return Ok(data);
         }
-        let pos = reader.stream_position().await?;
+        let pos = reader.position().await?;
         if *model == ZipModel::Parse {
-            reader.seek(SeekFrom::Start(data_position)).await?;
+            reader.set_position(data_position).await?;
         }
         let mut take_reader = reader.take(compressed_size as u64);
         let mut config = config.clone();
@@ -538,7 +538,7 @@ where
         config.un_compress_size_mut(uncompressed_size as u64);
         let mut data = T::from_config(&config).await?;
         binrw::io::copy(&mut take_reader, &mut data).await?;
-        data.seek(SeekFrom::Start(0)).await?;
+        data.seek_start().await?;
         // web_sys::console::log_4(
         //     &JsValue::from_str(&name),
         //     &JsValue::from_f64(compressed_size as f64),
@@ -546,7 +546,7 @@ where
         //     &JsValue::from_f64(len as f64),
         // );
         if *model == ZipModel::Parse {
-            reader.seek(SeekFrom::Start(pos)).await?;
+            reader.set_position(pos).await?;
         }
         Ok(data)
     }
@@ -577,17 +577,17 @@ fn zip_file_parse<R: Read + Seek + Send>(
     uncompressed_size: u32,
 ) -> impl Future<Output = BinResult<ZipFile>> + Send {
     async move {
-        let pos = reader.stream_position().await?;
+        let pos = reader.position().await?;
         if *model == ZipModel::Parse {
             reader
-                .seek(SeekFrom::Start(offset_of_local_file_header as u64))
+                .set_position(offset_of_local_file_header as u64)
                 .await?;
         }
         let value = reader
             .read_type_args(endian, (model, uncompressed_size))
             .await?;
         if *model == ZipModel::Parse {
-            reader.seek(SeekFrom::Start(pos)).await?;
+            reader.set_position(pos).await?;
         }
         Ok(value)
     }
@@ -609,10 +609,10 @@ where
         if *model == ZipModel::Bin {
             let mut value = value.lock().await;
             if let Some(value) = &mut *value {
-                let pos = value.stream_position().await?;
-                value.seek(SeekFrom::Start(0)).await?;
+                let pos = value.position().await?;
+                value.seek_start().await?;
                 binrw::io::copy(&mut *value, writer).await?;
-                value.seek(SeekFrom::Start(pos)).await?;
+                value.set_position(pos).await?;
             }
         }
         Ok(())
@@ -649,9 +649,9 @@ where
                 let (new_data, sha) = {
                     let mut data = self.data.lock().await;
                     if let Some(data) = &mut *data {
-                        data.seek(SeekFrom::Start(0)).await?;
+                        data.seek_start().await?;
                         let mut config = data.config().clone();
-                        let length = stream_length(&mut *data).await?;
+                        let length = data.length().await?;
                         config.compress_size_mut(length);
                         let new_data = T::from_config(&config).await?;
                         let mut hash_writer = HashWriter::new(new_data);
@@ -663,7 +663,7 @@ where
                             })?;
                         let value = hash_writer.hash();
                         let mut new_data = hash_writer.into_inner();
-                        new_data.seek(SeekFrom::Start(0)).await?;
+                        new_data.seek_start().await?;
                         (new_data, value)
                     } else {
                         return Err(Error::AssertFail {
@@ -690,10 +690,10 @@ where
         async move {
             let mut data = self.data.lock().await;
             if let Some(data) = &mut *data {
-                let pos = data.stream_position().await?;
+                let pos = data.position().await?;
                 let mut bytes = vec![];
                 data.read_to_end(&mut bytes).await?;
-                data.seek(SeekFrom::Start(pos)).await?;
+                data.set_position(pos).await?;
                 Ok(bytes)
             } else {
                 Err(Error::AssertFail {
@@ -707,11 +707,11 @@ where
         async move {
             let mut data = self.data.lock().await;
             if let Some(data) = &mut *data {
-                let pos = data.stream_position().await?;
-                data.seek(SeekFrom::Start(0)).await?;
+                let pos = data.position().await?;
+                data.seek_start().await?;
                 let mut multi_writer = HashWriterNull::new();
                 binrw::io::copy(&mut *data, &mut multi_writer).await?;
-                data.seek(SeekFrom::Start(pos)).await?;
+                data.set_position(pos).await?;
                 let sha = multi_writer.hash();
                 self.sha_value = Some(sha.clone());
                 Ok(sha)
@@ -737,8 +737,8 @@ where
                 let compress_data = {
                     let mut data = self.data.lock().await;
                     if let Some(data) = &mut *data {
-                        data.seek(SeekFrom::Start(0)).await?;
-                        let uncompressed_size = stream_length(data).await?;
+                        data.seek_start().await?;
+                        let uncompressed_size = data.length().await?;
                         self.crc_32_uncompressed_data = 0; //crc32 设置为0也能安装，网页可以忽略计算加快速度
                         self.file.crc_32_uncompressed_data = 0;
                         self.uncompressed_size = uncompressed_size as u32;
@@ -765,9 +765,9 @@ where
                             self.crc_32_uncompressed_data = crc32_reader.crc32();
                             self.file.crc_32_uncompressed_data = self.crc_32_uncompressed_data;
                         }
-                        self.compressed_size = stream_length(&mut compress_data).await? as u32;
+                        self.compressed_size = compress_data.length().await? as u32;
                         self.file.compressed_size = self.compressed_size;
-                        compress_data.seek(SeekFrom::Start(0)).await?;
+                        compress_data.seek_start().await?;
                         Some(compress_data)
                     } else {
                         self.crc_32_uncompressed_data = 0;
@@ -796,7 +796,7 @@ where
     }
     pub fn put_data(&mut self, mut stream: T) -> impl Future<Output = BinResult<()>> + Send {
         async move {
-            let length = stream_length(&mut stream).await? as u32;
+            let length = stream.length().await? as u32;
             self.sha_value = None;
             self.compressed_size = length;
             self.uncompressed_size = length;

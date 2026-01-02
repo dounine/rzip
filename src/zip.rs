@@ -1,6 +1,5 @@
 use crate::directory::{CompressionMethod, Directory, Name};
 use crate::file::{ExtraList, ZipFile};
-use crate::util::stream_length;
 use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
@@ -25,7 +24,7 @@ pub trait StreamDefault: Sized {
     type Config;
     fn from(&self) -> impl Future<Output = BinResult<Self>> + Send;
     fn from_config(config: &Self::Config) -> impl Future<Output = BinResult<Self>> + Send;
-    fn from_ref_config(
+    fn from_link_config(
         _pos: u64,
         _size: u64,
         config: &Self::Config,
@@ -71,7 +70,7 @@ impl BinRead for Magic {
                 0x02014b50 => Self::Directory,
                 0x04034b50 => Self::File,
                 _ => {
-                    let pos = reader.stream_position().await?;
+                    let pos = reader.position().await?;
                     return Err(Error::BadMagic {
                         pos,
                         found: Box::new(format!("magic {} not match", value)),
@@ -230,7 +229,7 @@ where
             // #[br(count = comment_length)]
             let comment: Vec<u8> = reader.read_le_args(comment_length as usize).await?;
             if *model == ZipModel::Parse {
-                reader.seek(SeekFrom::Start(offset as u64)).await?;
+                reader.set_position(offset as u64).await?; // .seek(SeekFrom::Start(offset as u64)).await?;
             }
             let directories: IndexDirectory<T> = reader
                 .read_le_args((model, config, entries, read_bytes))
@@ -389,9 +388,9 @@ where
     ) -> impl Future<Output = BinResult<FastZip<T>>> + Send {
         async move {
             let config = reader.config().clone();
-            let pos = reader.stream_position().await?;
-            let total = reader.seek(SeekFrom::End(0)).await?;
-            reader.seek(SeekFrom::Start(pos)).await?;
+            let pos = reader.position().await?;
+            let total = reader.seek_end().await?;
+            reader.set_position(pos).await?;
             let mut sum = 0;
             let mut callback = Self::create_adapter(total, &mut sum, callback);
             FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut callback)).await
@@ -416,7 +415,7 @@ where
                 pos: 0,
                 message: "data can't not none".to_string(),
             })?;
-            data.seek(SeekFrom::Start(0)).await?;
+            data.seek_start().await?;
             if let Some(dir) = self.directories.get_mut(file_name) {
                 return dir.put_data(data).await;
             }
@@ -458,15 +457,15 @@ where
                 pos: 0,
                 message: "data can't not none".to_string(),
             })?;
-            data.seek(SeekFrom::Start(0)).await?;
-            let length = stream_length(&mut data).await?;
+            data.seek_start().await?;
+            let length = data.length().await?;
             let uncompressed_size = length as u32;
             let crc_32_uncompressed_data = 0; //data.crc32_value();
             let compressed_size = uncompressed_size; //data.compress(CompressionLevel::DefaultLevel)? as u32;
 
             let mut buffer = vec![0u8; std::cmp::min(compressed_size as usize, 1024)];
             data.read_exact(&mut buffer).await?;
-            data.seek(SeekFrom::Start(0)).await?;
+            data.seek_start().await?;
             let internal_file_attributes = if Self::is_binary(&buffer) { 0 } else { 1 };
 
             let file_name = Name {
@@ -557,7 +556,7 @@ where
                 {
                     let mut data = director.data.lock().await;
                     if let Some(data) = &mut *data {
-                        stream_length(data).await?
+                        data.length().await?
                     } else {
                         0
                     }
@@ -581,7 +580,7 @@ where
         reader: &mut R,
     ) -> impl Future<Output = BinResult<Self>> + Send {
         async move {
-            reader.seek(SeekFrom::Start(0)).await?;
+            reader.seek_start().await?;
             FastZip::read_le_args(
                 reader,
                 (&ZipModel::Bin, &T::Config::default(), &mut |_bytes| {
@@ -607,7 +606,7 @@ where
     }
 
     #[cfg(feature = "parallel")]
-    pub fn package_parallel<'a,'c:'a, F>(
+    pub fn package_parallel<'a, 'c: 'a, F>(
         &'a mut self,
         writer: &'c mut T,
         compression_level: CompressionLevel,
@@ -713,7 +712,7 @@ where
                 directory_writer
                     .write_le_args(director, (&ZipModel::Package,))
                     .await?;
-                directory_writer.seek(SeekFrom::Start(0)).await?;
+                directory_writer.seek_start().await?;
                 directors_size += binrw::io::copy(&mut directory_writer, &mut header).await?;
 
                 let mut file_writer = writer.from().await?; // T::from_config(config)?;
@@ -721,13 +720,13 @@ where
                 file_writer
                     .write_le_args(&file, (&ZipModel::Package, director.uncompressed_size))
                     .await?;
-                file_writer.seek(SeekFrom::Start(0)).await?;
+                file_writer.seek_start().await?;
                 let file_writer_length = binrw::io::copy(&mut file_writer, writer).await?;
 
                 let file_data_length = if !director.file_name.inner.ends_with(&[b'/']) {
                     let mut data = director.data.lock().await;
                     if let Some(data) = &mut *data {
-                        data.seek(SeekFrom::Start(0)).await?;
+                        data.seek_start().await?;
                         binrw::io::copy(data, writer).await?
                     } else {
                         0
@@ -737,14 +736,14 @@ where
                 };
                 files_size += file_writer_length + file_data_length;
             }
-            header.seek(SeekFrom::Start(0)).await?;
+            header.seek_start().await?;
             binrw::io::copy(&mut header, writer).await?;
             self.size = directors_size as u32;
             self.entries = self.directories.len() as u16;
             self.number_of_directory_disk = self.directories.len() as u16;
             self.offset = files_size as u32;
             self.write_eocd(writer).await?;
-            writer.seek(SeekFrom::Start(0)).await?;
+            writer.seek_start().await?;
             Ok(())
         }
     }
@@ -779,8 +778,8 @@ pub fn parse_eocd_offset<R: Read + Seek + Send>(
         }
         let max_eocd_size: u64 = u16::MAX as u64 + 22;
         let mut search_size: u64 = 22; //最快的搜索
-        let file_size = stream_length(reader).await?;
-        let pos = reader.stream_position().await?;
+        let file_size = reader.length().await?;
+        let pos = reader.position().await?;
 
         if file_size < search_size {
             return Err(Error::BadMagic {
@@ -794,12 +793,13 @@ pub fn parse_eocd_offset<R: Read + Seek + Send>(
             search_size = search_size.min(max_eocd_size);
             reader.seek(SeekFrom::End(-(search_size as i64))).await?;
             for i in 0..search_size - 3 {
-                let pos = reader.stream_position().await?;
+                let pos = reader.position().await?;
                 // stream.pin()?;
                 // let magic: u32 = stream.read_value()?;
                 let magic: u32 = reader.read_type(endian).await?;
-                reader.seek(SeekFrom::Start(pos)).await?;
-                reader.seek(SeekFrom::Current(1)).await?;
+                reader.set_position(pos + 1).await?;
+                // reader.seek(SeekFrom::Start(pos)).await?;
+                // reader.seek(SeekFrom::Current(1)).await?;
                 // stream.un_pin()?;
                 // stream.seek(SeekFrom::Current(1))?;
                 if magic == 0x06054b50_u32 {

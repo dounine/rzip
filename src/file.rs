@@ -218,7 +218,7 @@ pub fn data_position_parse<R: Read + Seek + Send>(
             return reader.read_type(endian).await;
         }
         reader
-            .stream_position()
+            .position()
             .await
             .map_err(|e| binrw::Error::Custom {
                 pos: 0,
@@ -259,11 +259,11 @@ impl BinRead for ExtraList {
             if bytes > 0 {
                 let mut total_bytes = 0;
                 loop {
-                    let position = reader.stream_position().await?;
+                    let position = reader.position().await?;
                     let extra_field: Extra = reader.read_type(endian).await?;
                     extra_fields.push(extra_field);
 
-                    let size = reader.stream_position().await? - position;
+                    let size = reader.position().await? - position;
                     total_bytes += size;
                     if total_bytes >= bytes as u64 {
                         break;
