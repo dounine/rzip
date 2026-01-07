@@ -4,7 +4,7 @@ use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use std::io::Cursor;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Extra {
     NTFS {
         mtime: u64,

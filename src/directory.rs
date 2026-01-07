@@ -7,7 +7,6 @@ use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
-use std::fmt::Debug;
 use std::io;
 use std::io::SeekFrom;
 use std::string::FromUtf8Error;
@@ -15,7 +14,7 @@ use std::sync::Arc;
 
 // #[binrw]
 // #[brw(repr(u16))]
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub enum CompressionMethod {
     #[default]
     Store = 0x0000,
@@ -111,7 +110,7 @@ impl BinRead for CompressionMethod {
 // #[binrw]
 // #[br(import(count:u16,))]
 // #[bw()]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Name {
     // #[br(count = count)]
     pub inner: Vec<u8>,
@@ -179,16 +178,6 @@ impl TryInto<String> for Name {
         String::from_utf8(self.inner)
     }
 }
-#[derive(Debug, Clone)]
-pub struct Bool {
-    pub value: bool,
-}
-impl Default for Bool {
-    fn default() -> Self {
-        Bool { value: true }
-    }
-}
-#[derive(Debug)]
 pub struct Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,

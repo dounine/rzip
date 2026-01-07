@@ -4,7 +4,7 @@ use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
-use core::fmt::{Debug, Display};
+use core::fmt::{Display};
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
 use std::io::SeekFrom;
@@ -38,7 +38,7 @@ pub trait StreamDefault: Sized {
 
 // #[binrw]
 // #[brw(repr(u8))]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum ZipModel {
     Parse,
     Package,
@@ -47,7 +47,7 @@ pub enum ZipModel {
 
 // #[binrw]
 // #[brw(repr(u32))]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Magic {
     EoCd = 0x06054b50,
     Directory = 0x02014b50,
@@ -112,7 +112,6 @@ impl Default for Magic {
 // #[binrw::binwrite]
 // #[br(little, magic = 0x04034b50_u32, import(model:ZipModel,c:&T::Config))]
 // #[bw(little, magic = 0x04034b50_u32, import(model:ZipModel))]
-#[derive(Debug)]
 pub struct FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
@@ -252,7 +251,6 @@ where
         }
     }
 }
-#[derive(Debug)]
 pub struct IndexDirectory<T>(pub IndexMap<String, Directory<T>>)
 where
     T: Read + Write + Seek + Send + StreamDefault,

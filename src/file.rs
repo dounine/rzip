@@ -9,7 +9,7 @@ use std::io::Cursor;
 
 // #[binrw]
 // #[brw(little, magic = 0x04034b50_u32, import(model:&ZipModel,uncompressed_size:u32))]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ZipFile {
     // #[bw(calc = if file_name.inner.ends_with(&[b'/']) { 0x0a } else { 0x0e })]
     pub extract_zip_spec: u8,
@@ -226,7 +226,7 @@ pub fn data_position_parse<R: Read + Seek + Send>(
             })
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExtraList(pub Vec<Extra>);
 impl From<Vec<Extra>> for ExtraList {
     fn from(value: Vec<Extra>) -> Self {
