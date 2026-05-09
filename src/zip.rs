@@ -4,7 +4,7 @@ use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
-use core::fmt::{Display};
+use core::fmt::Display;
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
 use std::io::SeekFrom;
@@ -44,7 +44,58 @@ pub enum ZipModel {
     Package,
     Bin,
 }
+impl BinWrite for ZipModel {
+    type Args<'a> = ();
 
+    fn write_options<W: Write + Seek + Send>(
+        &self,
+        writer: &mut W,
+        endian: Endian,
+        args: Self::Args<'_>,
+    ) -> impl std::future::Future<Output = BinResult<()>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            let value: u32 = match self {
+                Self::Parse => 0x00,
+                Self::Package => 0x01,
+                Self::Bin => 0x02,
+            };
+            writer.write_type_args(&value, endian, args).await?;
+            Ok(())
+        }
+    }
+}
+impl BinRead for ZipModel {
+    type Args<'a> = ();
+
+    fn read_options<R: Read + Seek + Send>(
+        reader: &mut R,
+        endian: Endian,
+        args: Self::Args<'_>,
+    ) -> impl Future<Output = BinResult<Self>> + Send
+    where
+        Self: Send,
+    {
+        Box::pin(async move {
+            let value: u8 = reader.read_type_args(endian, args).await?;
+            let model = match value {
+                0x00 => Self::Parse,
+                0x01 => Self::Package,
+                0x02 => Self::Bin,
+                _ => {
+                    let pos = reader.position().await?;
+                    return Err(Error::BadMagic {
+                        pos,
+                        found: Box::new(format!("magic {} not match for ZipModel", value)),
+                    });
+                }
+            };
+            Ok(model)
+        })
+    }
+}
 // #[binrw]
 // #[brw(repr(u32))]
 #[derive(Clone, PartialEq)]

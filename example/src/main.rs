@@ -1,7 +1,7 @@
-use binrw::BinResult;
 use binrw::io::read::{Read, ReadAt};
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
+use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian};
 use fast_zip::CompressionLevel;
 use fast_zip::zip::{Config, FastZip, StreamDefault};
 use std::fmt::{Display, Formatter};
@@ -10,7 +10,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Cursor, SeekFrom};
 use std::sync::Arc;
 use std::time::Instant;
-
 
 pub enum MyData {
     File {
@@ -80,6 +79,51 @@ impl Config for MyStreamConfig {
 
     fn un_compress_size_mut(&mut self, value: u64) {
         self.un_compress_size = Some(value);
+    }
+}
+impl BinWrite for MyStreamConfig {
+    type Args<'a> = ();
+
+    fn write_options<W: Write + Seek + Send>(
+        &self,
+        writer: &mut W,
+        endian: Endian,
+        args: Self::Args<'_>,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        Self: Sync,
+    {
+        Box::pin(async move {
+            writer.write_type(&self.value, endian).await?;
+            writer.write_type(&self.limit_size, endian).await?;
+            writer.write_type(&self.compress_size, endian).await?;
+            writer.write_type(&self.un_compress_size, endian).await?;
+            writer.write_type(&self.open_files, endian).await?;
+            Ok(())
+        })
+    }
+}
+impl BinRead for MyStreamConfig {
+    type Args<'a> = ();
+
+    fn read_options<R: Read + Seek + Send>(
+        reader: &mut R,
+        endian: Endian,
+        _args: Self::Args<'_>,
+    ) -> impl Future<Output = BinResult<Self>> + Send
+    where
+        Self: Send,
+    {
+        Box::pin(async move {
+            Ok(Self {
+                value: reader.read_type(endian).await?,
+                limit_size: reader.read_type(endian).await?,
+                compress_size: reader.read_type(endian).await?,
+                un_compress_size: reader.read_type(endian).await?,
+                open_files: reader.read_type(endian).await?,
+                source: None,
+            })
+        })
     }
 }
 impl StreamDefault for MyData {
@@ -288,7 +332,7 @@ async fn main() {
 
     let mut config = MyStreamConfig::default();
     config.source = Some(source.clone());
-    
+
     // We start with a Shared view of the entire file
     let mut data: MyData = MyData::Shared {
         inner: source.clone(),
@@ -311,9 +355,9 @@ async fn main() {
     })
     .await
     .unwrap();
-    for (key,dir) in &mut zip_file.directories.0{
-        dir.decompressed().await.unwrap();
-    }
+    // for (key,dir) in &mut zip_file.directories.0{
+    //     dir.decompressed().await.unwrap();
+    // }
     // for (key, dir) in &mut zip_file.directories.0 {
     //     if key == "Payload/SideStore.app/AppIcon60x60@2x.png" {
     //         dir.decompressed().unwrap();
@@ -392,13 +436,17 @@ async fn main() {
     //     .await
     //     .unwrap();
     zip_file
-    .package_parallel(&mut writer, CompressionLevel::DefaultLevel,|total,bytes|{
-        Box::pin(async move {
-            // println!("{:.2}%", (bytes as f64 / total as f64) * 100.0)
-        })
-    })
-    .await
-    .unwrap();
+        .package_parallel(
+            &mut writer,
+            CompressionLevel::DefaultLevel,
+            |total, bytes| {
+                Box::pin(async move {
+                    // println!("{:.2}%", (bytes as f64 / total as f64) * 100.0)
+                })
+            },
+        )
+        .await
+        .unwrap();
     writer.seek_start().await.unwrap();
     dbg!("压缩时长", time.elapsed());
     let mut file = OpenOptions::new()
