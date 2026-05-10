@@ -10,7 +10,6 @@ use miniz_oxide::deflate::CompressionLevel;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::Arc;
 
 pub trait Config: Display + Sync + Send + Clone + Default {
     // type Value;
@@ -35,7 +34,7 @@ pub trait StreamDefault: Sized + Sync {
 
     fn config(&self) -> &Self::Config;
 
-    fn clone(&self) -> impl Future<Output = BinResult<Self>> + Send;
+    fn link(&self) -> impl Future<Output = BinResult<Self>> + Send;
 }
 
 // #[binrw]
@@ -279,7 +278,7 @@ where
             // #[bw(calc = comment.len() as u16)]
             let comment_length: u16 = reader.read_le().await?;
             // #[br(count = comment_length)]
-            let comment: Vec<u8> = reader.read_le_args(comment_length as usize).await?;
+            let comment: Vec<u8> = reader.read_le_args(comment_length as u64).await?;
             if *model == ZipModel::Parse {
                 reader.set_position(offset as u64).await?; // .seek(SeekFrom::Start(offset as u64)).await?;
             }

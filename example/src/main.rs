@@ -200,7 +200,7 @@ impl StreamDefault for MyData {
         MyData::from_config(self.config())
     }
 
-    fn clone(&self) -> impl Future<Output=BinResult<Self>> + Send {
+    fn link(&self) -> impl Future<Output=BinResult<Self>> + Send {
         Box::pin(async move {
             unimplemented!()
         })

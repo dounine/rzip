@@ -10,7 +10,6 @@ use miniz_oxide::inflate::stream::decompress_stream_callback;
 use std::io;
 use std::io::SeekFrom;
 use std::string::FromUtf8Error;
-use std::sync::Arc;
 
 // #[binrw]
 // #[brw(repr(u16))]
@@ -142,7 +141,7 @@ impl BinRead for Name {
         Self: Send,
     {
         async move {
-            let count = args as usize;
+            let count = args as u64;
             Ok(Name {
                 inner: reader.read_type_args(endian, count).await?,
             })
@@ -283,7 +282,7 @@ where
             let offset_of_local_file_header: u32 = reader.read_le().await?;
             let file_name: Name = reader.read_le_args(file_name_length).await?;
             let extra_fields: ExtraList = reader.read_le_args(extra_field_length).await?;
-            let file_comment: Vec<u8> = reader.read_le_args(file_comment_length as usize).await?;
+            let file_comment: Vec<u8> = reader.read_le_args(file_comment_length as u64).await?;
             let file: ZipFile = zip_file_parse(
                 reader,
                 endian,
@@ -427,7 +426,7 @@ where
                     return Ok(());
                 }
                 if *model == ZipModel::Bin {
-                    let mut value = data.clone().await?;
+                    let mut value = data.link().await?;
                     let pos = value.position().await?;
                     value.seek_start().await?;
                     binrw::io::copy(&mut value, writer).await?;
@@ -447,9 +446,9 @@ where
     pub fn try_clone(&self, config: &T::Config) -> impl Future<Output = BinResult<Self>> + Send {
         Box::pin(async {
             if let Some(data) = &self.data {
-                let data = data.clone().await?;
-                // let mut new_data = T::from_config(config).await?;
-                // binrw::io::copy(&mut data, &mut new_data).await?;
+                let mut data = data.link().await?;
+                let mut new_data = T::from_config(config).await?;
+                binrw::io::copy(&mut data, &mut new_data).await?;
                 Ok(Self {
                     created_zip_spec: self.created_zip_spec,
                     created_os: self.created_os,
