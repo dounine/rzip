@@ -20,7 +20,7 @@ pub trait Config: Display + Sync + Send + Clone + Default {
     fn un_compress_size_mut(&mut self, value: u64);
 }
 
-pub trait StreamDefault: Sized {
+pub trait StreamDefault: Sized + Sync {
     type Config;
     fn from(&self) -> impl Future<Output = BinResult<Self>> + Send;
     fn from_config(config: &Self::Config) -> impl Future<Output = BinResult<Self>> + Send;
@@ -34,6 +34,8 @@ pub trait StreamDefault: Sized {
     }
 
     fn config(&self) -> &Self::Config;
+
+    fn clone(&self) -> impl Future<Output = BinResult<Self>> + Send;
 }
 
 // #[binrw]
@@ -456,19 +458,15 @@ where
     }
     pub fn save_file(
         &mut self,
-        data: Arc<async_lock::Mutex<Option<T>>>,
+        mut data: T,
         file_name: &str,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
-            let mut data = data.lock().await.take().ok_or(Error::AssertFail {
-                pos: 0,
-                message: "data can't not none".to_string(),
-            })?;
             data.seek_start().await?;
             if let Some(dir) = self.directories.get_mut(file_name) {
                 return dir.put_data(data).await;
             }
-            self.add_file(Arc::new(async_lock::Mutex::new(Some(data))), file_name)
+            self.add_file(data, file_name)
                 .await?;
             Ok(())
         }
@@ -498,14 +496,10 @@ where
     }
     pub fn add_file(
         &mut self,
-        data: Arc<async_lock::Mutex<Option<T>>>,
+        mut data: T,
         file_name: &str,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
-            let mut data = data.lock().await.take().ok_or(Error::AssertFail {
-                pos: 0,
-                message: "data can't not none".to_string(),
-            })?;
             data.seek_start().await?;
             let length = data.length().await?;
             let uncompressed_size = length as u32;
@@ -536,7 +530,7 @@ where
             let directory = Directory {
                 // _config: PhantomData,
                 compressed: false,
-                data: Arc::new(async_lock::Mutex::new(Some(data))),
+                data: Some(data),
                 created_zip_spec: 0x1E, //3.0
                 created_os: 0x03,       //Uninx
                 extract_zip_spec: 0x0E, //2.0
@@ -603,8 +597,8 @@ where
                 total_size += if !director.compressed
                     && director.compression_method == CompressionMethod::Deflate
                 {
-                    let mut data = director.data.lock().await;
-                    if let Some(data) = &mut *data {
+                    // let mut data = director.data.lock().await;
+                    if let Some(data) = &mut director.data {
                         data.length().await?
                     } else {
                         0
@@ -773,8 +767,8 @@ where
                 let file_writer_length = binrw::io::copy(&mut file_writer, writer).await?;
 
                 let file_data_length = if !director.file_name.inner.ends_with(&[b'/']) {
-                    let mut data = director.data.lock().await;
-                    if let Some(data) = &mut *data {
+                    // let mut data = director.data.lock().await;
+                    if let Some(data) = &mut director.data {
                         data.seek_start().await?;
                         binrw::io::copy(data, writer).await?
                     } else {

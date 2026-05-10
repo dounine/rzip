@@ -199,6 +199,17 @@ impl StreamDefault for MyData {
     fn from(&self) -> impl Future<Output = BinResult<Self>> + Send {
         MyData::from_config(self.config())
     }
+
+    fn clone(&self) -> impl Future<Output=BinResult<Self>> + Send {
+        Box::pin(async move {
+            unimplemented!()
+        })
+        // match self {
+        //     MyData::File { .. } => {}
+        //     MyData::Mem { .. } => {}
+        //     MyData::Shared { .. } => {}
+        // }
+    }
 }
 impl Default for MyData {
     fn default() -> Self {

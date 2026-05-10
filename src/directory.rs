@@ -240,7 +240,7 @@ where
     // #[br(parse_with = data_parse,args(model,config,Self::is_file(&file_name),&file_name,file.data_position,compressed_size,file.compressed_size,uncompressed_size)
     // )]
     // #[bw(write_with = data_write,args(model,self.is_dir()))]
-    pub data: Arc<async_lock::Mutex<Option<T>>>,
+    pub data: Option<T>,
 }
 impl<T> BinRead for Directory<T>
 where
@@ -348,7 +348,7 @@ where
                 extra_fields,
                 file_comment,
                 file,
-                data: Arc::new(async_lock::Mutex::new(Some(data))),
+                data: Some(data),
             })
         }
     }
@@ -421,8 +421,19 @@ where
             writer.write_le(&self.extra_fields).await?;
             writer.write_le(&self.file_comment).await?;
 
-            zip_file_writer(writer, endian, &self.file, &model, uncompressed_size).await?;
-            data_write(writer, self.data.clone(), &model, self.is_dir()).await?;
+            zip_file_writer(writer, endian, &self.file, model, uncompressed_size).await?;
+            if let Some(data) = &self.data {
+                if self.is_dir() {
+                    return Ok(());
+                }
+                if *model == ZipModel::Bin {
+                    let mut value = data.clone().await?;
+                    let pos = value.position().await?;
+                    value.seek_start().await?;
+                    binrw::io::copy(&mut value, writer).await?;
+                    value.set_position(pos).await?;
+                }
+            }
             Ok(())
         }
     }
@@ -434,11 +445,11 @@ where
     T::Config: Config + 'static,
 {
     pub fn try_clone(&self, config: &T::Config) -> impl Future<Output = BinResult<Self>> + Send {
-        async move {
-            let mut data = self.data.lock().await;
-            if let Some(data) = &mut *data {
-                let mut new_data = T::from_config(config).await?;
-                binrw::io::copy(&mut *data, &mut new_data).await?;
+        Box::pin(async {
+            if let Some(data) = &self.data {
+                let data = data.clone().await?;
+                // let mut new_data = T::from_config(config).await?;
+                // binrw::io::copy(&mut data, &mut new_data).await?;
                 Ok(Self {
                     created_zip_spec: self.created_zip_spec,
                     created_os: self.created_os,
@@ -459,7 +470,7 @@ where
                     extra_fields: self.extra_fields.clone(),
                     file_comment: self.file_comment.clone(),
                     file: self.file.clone(),
-                    data: Arc::new(async_lock::Mutex::new(Some(new_data))),
+                    data: Some(data),
                 })
             } else {
                 Err(Error::AssertFail {
@@ -467,7 +478,7 @@ where
                     message: "directory data is none".to_string(),
                 })
             }
-        }
+        })
     }
 }
 impl<T> Directory<T>
@@ -581,32 +592,7 @@ fn zip_file_parse<R: Read + Seek + Send>(
         Ok(value)
     }
 }
-// #[binrw::writer(writer)]
-fn data_write<T, W: Write + Send>(
-    writer: &mut W,
-    value: Arc<async_lock::Mutex<Option<T>>>,
-    model: &ZipModel,
-    is_dir: bool,
-) -> impl Future<Output = BinResult<()>> + Send
-where
-    T: Read + Write + Seek + Send + StreamDefault,
-{
-    async move {
-        if is_dir {
-            return Ok(());
-        }
-        if *model == ZipModel::Bin {
-            let mut value = value.lock().await;
-            if let Some(value) = &mut *value {
-                let pos = value.position().await?;
-                value.seek_start().await?;
-                binrw::io::copy(&mut *value, writer).await?;
-                value.set_position(pos).await?;
-            }
-        }
-        Ok(())
-    }
-}
+
 // impl<T> Directory<T>
 // where
 //     T: Read + Write + Seek + Send + StreamDefault,
@@ -636,8 +622,8 @@ where
         async move {
             if self.compressed() {
                 let (new_data, sha) = {
-                    let mut data = self.data.lock().await;
-                    if let Some(data) = &mut *data {
+                    // let mut data = self.data.lock().await;
+                    if let Some(data) = &mut self.data {
                         data.seek_start().await?;
                         let mut config = data.config().clone();
                         let length = data.length().await?;
@@ -662,7 +648,7 @@ where
                     }
                 };
                 self.sha_value = Some(sha);
-                self.data = Arc::new(async_lock::Mutex::new(Some(new_data)));
+                self.data = Some(new_data);
                 self.compressed = false;
             }
             Ok(())
@@ -677,8 +663,8 @@ where
     }
     pub fn copy_data(&mut self) -> impl Future<Output = BinResult<Vec<u8>>> + Send {
         async move {
-            let mut data = self.data.lock().await;
-            if let Some(data) = &mut *data {
+            // let mut data = self.data.lock().await;
+            if let Some(data) = &mut self.data {
                 let pos = data.position().await?;
                 let mut bytes = vec![];
                 data.read_to_end(&mut bytes).await?;
@@ -694,8 +680,8 @@ where
     }
     pub fn sha_build(&mut self) -> impl Future<Output = BinResult<([u8; 20], [u8; 32])>> + Send {
         async move {
-            let mut data = self.data.lock().await;
-            if let Some(data) = &mut *data {
+            // let mut data = self.data.lock().await;
+            if let Some(data) = &mut self.data {
                 let pos = data.position().await?;
                 data.seek_start().await?;
                 let mut multi_writer = HashWriterNull::new();
@@ -724,8 +710,8 @@ where
                 let mut config = config.clone();
                 config.compress_size_mut(self.compressed_size as u64);
                 let compress_data = {
-                    let mut data = self.data.lock().await;
-                    if let Some(data) = &mut *data {
+                    // let mut data = self.data.lock().await;
+                    if let Some(data) = &mut self.data {
                         data.seek_start().await?;
                         let uncompressed_size = data.length().await?;
                         self.crc_32_uncompressed_data = 0; //crc32 设置为0也能安装，网页可以忽略计算加快速度
@@ -764,7 +750,7 @@ where
                         None
                     }
                 };
-                self.data = Arc::new(async_lock::Mutex::new(compress_data));
+                self.data = compress_data;
                 self.compressed = true;
             }
             Ok(())
@@ -792,7 +778,7 @@ where
             self.file.compressed_size = self.compressed_size;
             self.file.uncompressed_size = self.uncompressed_size;
             self.compressed = false;
-            self.data = Arc::new(async_lock::Mutex::new(Some(stream)));
+            self.data = Some(stream);
             Ok(())
         }
     }
