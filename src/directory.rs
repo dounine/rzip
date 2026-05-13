@@ -143,7 +143,7 @@ impl BinRead for Name {
         async move {
             let count = args as u64;
             Ok(Name {
-                inner: reader.read_type_args(endian, count).await?,
+                inner: reader.read_type_args(endian, (count, ())).await?,
             })
         }
     }
@@ -282,7 +282,7 @@ where
             let offset_of_local_file_header: u32 = reader.read_le().await?;
             let file_name: Name = reader.read_le_args(file_name_length).await?;
             let extra_fields: ExtraList = reader.read_le_args(extra_field_length).await?;
-            let file_comment: Vec<u8> = reader.read_le_args(file_comment_length as u64).await?;
+            let file_comment: Vec<u8> = reader.read_le_args((file_comment_length as u64,())).await?;
             let file: ZipFile = zip_file_parse(
                 reader,
                 endian,
@@ -296,36 +296,45 @@ where
             let data = if !Self::is_file(&file_name) {
                 T::from_config(config).await?
             } else {
-                let pos = reader.position().await?;
-                if *model == ZipModel::Parse {
-                    reader.set_position(file.data_position).await?;
-                }
-                let config_pos = reader.position().await?;
-                // let mut config = config.clone();
-                // config.compress_size_mut(compressed_size as u64);
-                // config.un_compress_size_mut(uncompressed_size as u64);
-                let (mut data, need_copy) =
-                    T::from_link_config(config_pos, compressed_size as u64, config).await?;
-                if need_copy {
-                    let mut take_reader = reader.take(compressed_size as u64);
-                    let mut buffer = vec![0u8; 1024 * 8];
-                    loop {
-                        let len = take_reader.read(&mut buffer).await?;
-                        if len == 0 {
-                            break;
-                        }
-                        data.write_all(&buffer[..len]).await?;
-                        read_bytes(len as u64).await;
-                    }
+                if *model == ZipModel::Bin {
+                    let length: u64 = reader.read_type(endian).await?;
+                    let mut data = reader.take(length);
+                    let mut writer = T::from_config(config).await?;
+                    binrw::io::copy(&mut data, &mut writer).await?;
+                    writer.seek_start().await?;
+                    writer
                 } else {
-                    reader.seek_relative(compressed_size as i64).await?;
-                    read_bytes(compressed_size as u64).await;
+                    let pos = reader.position().await?;
+                    if *model == ZipModel::Parse {
+                        reader.set_position(file.data_position).await?;
+                    }
+                    let config_pos = reader.position().await?;
+                    // let mut config = config.clone();
+                    // config.compress_size_mut(compressed_size as u64);
+                    // config.un_compress_size_mut(uncompressed_size as u64);
+                    let (mut data, need_copy) =
+                        T::from_link_config(config_pos, compressed_size as u64, config).await?;
+                    if need_copy {
+                        let mut take_reader = reader.take(compressed_size as u64);
+                        let mut buffer = vec![0u8; 1024 * 8];
+                        loop {
+                            let len = take_reader.read(&mut buffer).await?;
+                            if len == 0 {
+                                break;
+                            }
+                            data.write_all(&buffer[..len]).await?;
+                            read_bytes(len as u64).await;
+                        }
+                    } else {
+                        reader.seek_relative(compressed_size as i64).await?;
+                        read_bytes(compressed_size as u64).await;
+                    }
+                    data.seek_start().await?;
+                    if *model == ZipModel::Parse {
+                        reader.set_position(pos).await?;
+                    }
+                    data
                 }
-                data.seek_start().await?;
-                if *model == ZipModel::Parse {
-                    reader.set_position(pos).await?;
-                }
-                data
             };
             Ok(Self {
                 created_zip_spec,
@@ -429,6 +438,8 @@ where
                     let mut value = data.link().await?;
                     let pos = value.position().await?;
                     value.seek_start().await?;
+                    let length: u64 = value.length().await?;
+                    writer.write_type(&length, endian).await?;
                     binrw::io::copy(&mut value, writer).await?;
                     value.set_position(pos).await?;
                 }

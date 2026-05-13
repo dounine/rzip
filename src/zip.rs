@@ -39,10 +39,10 @@ pub trait StreamDefault: Sized + Sync {
 
 // #[binrw]
 // #[brw(repr(u8))]
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Default, Clone, Eq, PartialEq)]
 pub enum ZipModel {
+    #[default]
     Parse,
-    Package,
     Bin,
 }
 impl BinWrite for ZipModel {
@@ -58,10 +58,9 @@ impl BinWrite for ZipModel {
         Self: Sync,
     {
         async move {
-            let value: u32 = match self {
+            let value: u8 = match self {
                 Self::Parse => 0x00,
-                Self::Package => 0x01,
-                Self::Bin => 0x02,
+                Self::Bin => 0x01,
             };
             writer.write_type_args(&value, endian, args).await?;
             Ok(())
@@ -83,7 +82,6 @@ impl BinRead for ZipModel {
             let value: u8 = reader.read_type_args(endian, args).await?;
             let model = match value {
                 0x00 => Self::Parse,
-                0x01 => Self::Package,
                 0x02 => Self::Bin,
                 _ => {
                     let pos = reader.position().await?;
@@ -225,6 +223,10 @@ where
             if *model == ZipModel::Parse {
                 writer.write_le(&self.magic).await?;
             }
+            if *model == ZipModel::Bin {
+                writer.write_le(&self.eocd_offset).await?;
+            }
+            writer.write_le(&self.magic).await?;
             writer.write_le(&self.number_of_disk).await?;
             writer.write_le(&self.directory_starts).await?;
             writer.write_le(&self.number_of_directory_disk).await?;
@@ -265,8 +267,13 @@ where
             } else {
                 false
             };
-            let eocd_offset = parse_eocd_offset(reader, endian, model).await?;
-            reader.seek(SeekFrom::End(-(eocd_offset as i64))).await?;
+            let eocd_offset = if *model == ZipModel::Bin {
+                reader.read_le::<u64>().await?
+            } else {
+                let eocd_offset = parse_eocd_offset(reader, endian, model).await?;
+                reader.seek(SeekFrom::End(-(eocd_offset as i64))).await?;
+                eocd_offset
+            };
             let magic: Magic = reader.read_le().await?;
             let number_of_disk: u16 = reader.read_le().await?;
             let directory_starts: u16 = reader.read_le().await?;
@@ -278,7 +285,7 @@ where
             // #[bw(calc = comment.len() as u16)]
             let comment_length: u16 = reader.read_le().await?;
             // #[br(count = comment_length)]
-            let comment: Vec<u8> = reader.read_le_args(comment_length as u64).await?;
+            let comment: Vec<u8> = reader.read_le_args((comment_length as u64, ())).await?;
             if *model == ZipModel::Parse {
                 reader.set_position(offset as u64).await?; // .seek(SeekFrom::Start(offset as u64)).await?;
             }
@@ -465,8 +472,7 @@ where
             if let Some(dir) = self.directories.get_mut(file_name) {
                 return dir.put_data(data).await;
             }
-            self.add_file(data, file_name)
-                .await?;
+            self.add_file(data, file_name).await?;
             Ok(())
         }
     }
@@ -752,7 +758,7 @@ where
                 director.offset_of_local_file_header = files_size as u32;
                 let mut directory_writer = writer.from().await?;
                 directory_writer
-                    .write_le_args(director, (&ZipModel::Package,))
+                    .write_le_args(director, (&ZipModel::Parse,))
                     .await?;
                 directory_writer.seek_start().await?;
                 directors_size += binrw::io::copy(&mut directory_writer, &mut header).await?;
@@ -760,7 +766,7 @@ where
                 let mut file_writer = writer.from().await?; // T::from_config(config)?;
                 let file = &director.file;
                 file_writer
-                    .write_le_args(&file, (&ZipModel::Package, director.uncompressed_size))
+                    .write_le_args(&file, (&ZipModel::Parse, director.uncompressed_size))
                     .await?;
                 file_writer.seek_start().await?;
                 let file_writer_length = binrw::io::copy(&mut file_writer, writer).await?;
