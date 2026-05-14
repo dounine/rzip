@@ -1,5 +1,6 @@
 use crate::file::{ExtraList, ZipFile};
-use crate::zip::{Config, ReadBytesFun, StreamDefault, ZipModel};
+use crate::zip::{Config, StreamDefault, ZipModel};
+use binrw::io::ReadBytesCallback;
 use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
 use binrw::io::seek::Seek;
@@ -246,7 +247,12 @@ where
     T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + 'static,
 {
-    type Args<'a> = (u16, &'a ZipModel, &'a T::Config, &'a mut ReadBytesFun<'a>);
+    type Args<'a> = (
+        u16,
+        &'a ZipModel,
+        &'a T::Config,
+        &'a mut ReadBytesCallback<'a>,
+    );
     fn read_options<R: Read + Seek + Send>(
         reader: &mut R,
         endian: Endian,
@@ -268,6 +274,11 @@ where
             let compression_method: CompressionMethod = reader.read_le().await?;
             let compressed: bool =
                 compressed_parse(reader, endian, &model, &compression_method).await?;
+            let sha_value = if *model == ZipModel::Bin {
+                reader.read_type(endian).await?
+            } else {
+                None
+            };
             let last_modification_time: u16 = reader.read_le().await?;
             let last_modification_date: u16 = reader.read_le().await?;
             let crc_32_uncompressed_data: u32 = reader.read_le().await?;
@@ -282,7 +293,9 @@ where
             let offset_of_local_file_header: u32 = reader.read_le().await?;
             let file_name: Name = reader.read_le_args(file_name_length).await?;
             let extra_fields: ExtraList = reader.read_le_args(extra_field_length).await?;
-            let file_comment: Vec<u8> = reader.read_le_args((file_comment_length as u64,())).await?;
+            let file_comment: Vec<u8> = reader
+                .read_le_args((file_comment_length as u64, ()))
+                .await?;
             let file: ZipFile = zip_file_parse(
                 reader,
                 endian,
@@ -302,6 +315,7 @@ where
                     let mut writer = T::from_config(config).await?;
                     binrw::io::copy(&mut data, &mut writer).await?;
                     writer.seek_start().await?;
+                    read_bytes(length).await;
                     writer
                 } else {
                     let pos = reader.position().await?;
@@ -343,7 +357,7 @@ where
                 extract_os,
                 compression_method,
                 compressed,
-                sha_value: None,
+                sha_value,
                 last_modification_time,
                 last_modification_date,
                 crc_32_uncompressed_data,
@@ -394,6 +408,7 @@ where
                 .await?;
             if *model == ZipModel::Bin {
                 writer.write_le(&self.compressed).await?;
+                writer.write_le(&self.sha_value).await?;
             }
             writer.write_le(&self.last_modification_time).await?;
             writer.write_le(&self.last_modification_date).await?;
@@ -627,7 +642,7 @@ where
     }
     pub fn decompressed_callback<'a>(
         &mut self,
-        callback_fun: &'a mut ReadBytesFun<'a>,
+        callback_fun: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             if self.compressed() {
@@ -713,7 +728,7 @@ where
         config: &'a T::Config,
         crc32_computer: bool,
         compression_level: CompressionLevel,
-        callback_fun: &'a mut ReadBytesFun<'a>,
+        callback_fun: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             if !self.compressed && self.compression_method == CompressionMethod::Deflate {

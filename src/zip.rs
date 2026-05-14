@@ -10,6 +10,7 @@ use miniz_oxide::deflate::CompressionLevel;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use binrw::io::ReadBytesCallback;
 
 pub trait Config: Display + Sync + Send + Clone + Default {
     // type Value;
@@ -242,13 +243,13 @@ where
         }
     }
 }
-pub type ReadBytesFun<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a;
+// pub type ReadBytesFun<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a;
 impl<T> BinRead for FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + Sync + 'static,
 {
-    type Args<'a> = (&'a ZipModel, &'a T::Config, &'a mut ReadBytesFun<'a>);
+    type Args<'a> = (&'a ZipModel, &'a T::Config, &'a mut ReadBytesCallback<'a>);
 
     fn read_options<R: Read + Seek + Send>(
         reader: &mut R,
@@ -260,6 +261,7 @@ where
     {
         async move {
             let (model, config, read_bytes) = args;
+            let pos = reader.position().await?;
             let magic: u32 = reader.read_le().await?;
             assert_eq!(magic, 0x04034b50_u32);
             let crc32_computer = if *model == ZipModel::Bin {
@@ -289,6 +291,7 @@ where
             if *model == ZipModel::Parse {
                 reader.set_position(offset as u64).await?; // .seek(SeekFrom::Start(offset as u64)).await?;
             }
+            read_bytes(reader.position().await? - pos).await;
             let directories: IndexDirectory<T> = reader
                 .read_le_args((model, config, entries, read_bytes))
                 .await?;
@@ -340,7 +343,7 @@ where
     T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + Sync + 'static,
 {
-    type Args<'a> = (&'a ZipModel, &'a T::Config, u16, &'a mut ReadBytesFun<'a>);
+    type Args<'a> = (&'a ZipModel, &'a T::Config, u16, &'a mut ReadBytesCallback<'a>);
 
     fn read_options<R: Read + Seek + Send>(
         reader: &mut R,
@@ -658,7 +661,7 @@ where
         &'a mut self,
         writer: &'c mut T,
         compression_level: CompressionLevel,
-        mut callback: F,
+        callback: &'a mut F,
     ) -> impl Future<Output = BinResult<()>> + Send + 'a
     where
         T: 'static,
