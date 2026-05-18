@@ -634,7 +634,7 @@ fn zip_file_parse<R: Read + Seek + Send>(
 impl<T> Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
     // <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn compressed(&self) -> bool {

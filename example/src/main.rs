@@ -450,7 +450,7 @@ async fn main() {
         .package_parallel(
             &mut writer,
             CompressionLevel::DefaultLevel,
-            |total, bytes| {
+            &mut |total, bytes| {
                 Box::pin(async move {
                     // println!("{:.2}%", (bytes as f64 / total as f64) * 100.0)
                 })

@@ -1,5 +1,6 @@
 use crate::directory::{CompressionMethod, Directory, Name};
 use crate::file::{ExtraList, ZipFile};
+use binrw::io::ReadBytesCallback;
 use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
@@ -10,7 +11,6 @@ use miniz_oxide::deflate::CompressionLevel;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use binrw::io::ReadBytesCallback;
 
 pub trait Config: Display + Sync + Send + Clone + Default {
     // type Value;
@@ -343,7 +343,12 @@ where
     T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config + Sync + 'static,
 {
-    type Args<'a> = (&'a ZipModel, &'a T::Config, u16, &'a mut ReadBytesCallback<'a>);
+    type Args<'a> = (
+        &'a ZipModel,
+        &'a T::Config,
+        u16,
+        &'a mut ReadBytesCallback<'a>,
+    );
 
     fn read_options<R: Read + Seek + Send>(
         reader: &mut R,
@@ -412,7 +417,7 @@ where
 impl<T> FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
     // <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn empty() -> BinResult<FastZip<T>> {
@@ -647,96 +652,64 @@ where
         compression_level: CompressionLevel,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
-            self.package_with_callback(
-                writer,
-                compression_level,
-                |_total, _size| Box::pin(async {}),
-            )
+            self.package_with_callback(writer, compression_level, &mut |_total, _size| {
+                Box::pin(async {})
+            })
             .await
         }
     }
-
     #[cfg(feature = "parallel")]
-    pub fn package_parallel<'a, 'c: 'a, F>(
+    pub async fn package_parallel<'a, 'c: 'a, F>(
         &'a mut self,
         writer: &'c mut T,
         compression_level: CompressionLevel,
         callback: &'a mut F,
-    ) -> impl Future<Output = BinResult<()>> + Send + 'a
+    ) -> BinResult<()>
     where
-        T: 'static,
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>>,
     {
         use tokio::sync::mpsc;
-        use tokio::task::JoinSet;
-        async move {
-            let total_size = self.computer_un_compress_size().await?;
+        let total_size = self.computer_un_compress_size().await?;
+        let cfg = writer.config().clone(); // 使用 Arc 实现真正的共享
+        let crc32 = self.crc32_computer;
+        let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
 
-            let cfg = writer.config().clone();
-            let crc32 = self.crc32_computer;
-            let directories = std::mem::take(&mut self.directories.0);
-
-            let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
-
-            // 将 callback 运行在当前协程中，而不是 spawn 出去
-            // 这样 callback 就不需要 'static 生命周期
-            let monitor_future = async {
-                let mut processed = 0;
-                while let Some(bytes) = rx.recv().await {
-                    processed += bytes;
-                    callback(total_size, processed).await;
+        let results = unsafe {
+            async_scoped::TokioScope::scope_and_collect(|scope| {
+                for (_, dir) in &mut self.directories.0 {
+                    let cfg = &cfg;
+                    let tx = tx.clone();
+                    scope.spawn(async move {
+                        let mut f = move |bytes: u64| {
+                            let tx = tx.clone();
+                            Box::pin(async move {
+                                let _ = tx.send(bytes);
+                            })
+                                as Pin<Box<dyn Future<Output = ()> + Send>>
+                        };
+                        dir.compress_callback(cfg, crc32, compression_level, &mut f)
+                            .await
+                    });
                 }
-            };
-
-            let mut set = JoinSet::new();
-            for (index, (name, mut dir)) in directories.into_iter().enumerate() {
-                let cfg = cfg.clone();
-                let tx = tx.clone();
-                set.spawn(async move {
-                    dir.compress_callback(&cfg, crc32, compression_level, &mut |bytes| {
-                        let tx = tx.clone();
-                        Box::pin(async move {
-                            let _ = tx.send(bytes);
-                        })
-                    })
-                    .await?;
-                    Ok::<(usize, String, Directory<T>), binrw::Error>((index, name, dir))
-                });
+                drop(tx);
+            })
+        };
+        let receive_bytes = async {
+            let mut processed = 0;
+            while let Some(bytes) = rx.recv().await {
+                processed += bytes;
+                callback(total_size, processed).await;
             }
-            drop(tx); // 必须在主协程中 drop tx，否则 rx 永远不会结束
-
-            // 使用 tokio::join! 同时运行监控任务和并行压缩任务
-            // 但这里有个问题：set.join_next() 需要循环调用
-            // 所以我们需要把 monitor_future 和 set 的结果收集过程并发运行
-
-            let collect_future = async {
-                let mut results = Vec::new();
-                while let Some(res) = set.join_next().await {
-                    let (index, name, dir) = res.map_err(|e| binrw::Error::Custom {
-                        pos: 0,
-                        err: Box::new(e),
-                    })??;
-                    results.push((index, name, dir));
-                }
-                Ok::<_, binrw::Error>(results)
-            };
-
-            let (_, results) = tokio::join!(monitor_future, collect_future);
-            let mut results: Vec<(usize, String, Directory<T>)> = results?;
-
-            results.sort_by_key(|(index, _, _)| *index);
-
-            for (_, name, dir) in results {
-                self.directories.insert(name, dir);
-            }
-            self.package(writer, compression_level).await
-        }
+            processed
+        };
+        let _result = tokio::join!(results, receive_bytes);
+        self.package(writer, compression_level).await
     }
     pub fn package_with_callback<F>(
         &mut self,
         writer: &mut T,
         compression_level: CompressionLevel,
-        callback: F,
+        callback: &mut F,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
         F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
