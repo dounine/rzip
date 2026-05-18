@@ -33,14 +33,16 @@ pub enum CompressionMethod {
 impl BinWrite for CompressionMethod {
     type Args<'a> = ();
 
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
     where
-        Self: Sync,
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move {
             let value: u16 = self.clone().into();
@@ -70,13 +72,15 @@ impl Into<u16> for CompressionMethod {
 impl BinRead for CompressionMethod {
     type Args<'a> = ();
 
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
     where
-        Self: Send,
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
         async move {
             let result = reader.read_type_args::<u16>(endian, args).await?;
@@ -118,14 +122,16 @@ pub struct Name {
 impl BinWrite for Name {
     type Args<'a> = ();
 
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
     where
-        Self: Sync,
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move { writer.write_type_args(&self.inner, endian, args).await }
     }
@@ -133,13 +139,15 @@ impl BinWrite for Name {
 impl BinRead for Name {
     type Args<'a> = u16;
 
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
     where
-        Self: Send,
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
         async move {
             let count = args as u64;
@@ -181,7 +189,7 @@ impl TryInto<String> for Name {
 pub struct Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
     pub created_zip_spec: u8,
     pub created_os: u8,
@@ -245,21 +253,27 @@ where
 impl<T> BinRead for Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
-    type Args<'a> = (
+    type Args<'a>
+        = (
         u16,
         &'a ZipModel,
         &'a T::Config,
         &'a mut ReadBytesCallback<'a>,
-    );
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+    )
     where
-        Self: Send,
+        T: 'a;
+
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
+        endian: Endian,
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
+    where
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
         async move {
             let (_index, model, config, read_bytes) = args;
@@ -378,18 +392,23 @@ where
 impl<T> BinWrite for Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
-    type Args<'a> = (&'a ZipModel,);
-
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+    type Args<'a>
+        = (&'a ZipModel,)
     where
-        Self: Sync,
+        T: 'a;
+
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
+        endian: Endian,
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
+    where
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move {
             let (model,) = args;
@@ -467,7 +486,7 @@ where
 impl<T> Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
     pub fn try_clone(&self, config: &T::Config) -> impl Future<Output = BinResult<Self>> + Send {
         Box::pin(async {
@@ -495,7 +514,7 @@ where
                     extra_fields: self.extra_fields.clone(),
                     file_comment: self.file_comment.clone(),
                     file: self.file.clone(),
-                    data: Some(data),
+                    data: Some(new_data),
                 })
             } else {
                 Err(Error::AssertFail {
@@ -509,8 +528,7 @@ where
 impl<T> Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
+    T::Config: Config,
 {
     pub fn is_dir(&self) -> bool {
         self.file_name.inner.ends_with(&[b'/'])
@@ -546,7 +564,7 @@ pub fn data_parse<T, R: Read + Seek + Send>(
 ) -> impl Future<Output = BinResult<T>> + Send
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
     async move {
         let data = T::from_config(config).await?;
@@ -618,24 +636,10 @@ fn zip_file_parse<R: Read + Seek + Send>(
     }
 }
 
-// impl<T> Directory<T>
-// where
-//     T: Read + Write + Seek + Send + StreamDefault,
-//     T::Config: Config + 'static,
-//     // <T::Config as Config>::Value: Display + Default + Clone,
-// {
-//     pub fn data(&self) -> core::cell::Ref<'_, T> {
-//         self.data.borrow()
-//     }
-//     pub fn data_mut(&mut self) -> core::cell::RefMut<'_, T> {
-//         self.data.borrow_mut()
-//     }
-// }
 impl<T> Directory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config,
-    // <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn compressed(&self) -> bool {
         self.compressed
@@ -705,7 +709,6 @@ where
     }
     pub fn sha_build(&mut self) -> impl Future<Output = BinResult<([u8; 20], [u8; 32])>> + Send {
         async move {
-            // let mut data = self.data.lock().await;
             if let Some(data) = &mut self.data {
                 let pos = data.position().await?;
                 data.seek_start().await?;

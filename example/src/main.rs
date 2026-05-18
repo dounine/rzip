@@ -84,37 +84,41 @@ impl Config for MyStreamConfig {
 impl BinWrite for MyStreamConfig {
     type Args<'a> = ();
 
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
     where
-        Self: Sync,
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
-        Box::pin(async move {
+        async move {
             writer.write_type(&self.value, endian).await?;
             writer.write_type(&self.limit_size, endian).await?;
             writer.write_type(&self.compress_size, endian).await?;
             writer.write_type(&self.un_compress_size, endian).await?;
             writer.write_type(&self.open_files, endian).await?;
             Ok(())
-        })
+        }
     }
 }
 impl BinRead for MyStreamConfig {
     type Args<'a> = ();
 
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
         endian: Endian,
-        _args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+        _args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
     where
-        Self: Send,
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
-        Box::pin(async move {
+        async move {
             Ok(Self {
                 value: reader.read_type(endian).await?,
                 limit_size: reader.read_type(endian).await?,
@@ -123,7 +127,7 @@ impl BinRead for MyStreamConfig {
                 open_files: reader.read_type(endian).await?,
                 source: None,
             })
-        })
+        }
     }
 }
 impl StreamDefault for MyData {
@@ -200,10 +204,8 @@ impl StreamDefault for MyData {
         MyData::from_config(self.config())
     }
 
-    fn link(&self) -> impl Future<Output=BinResult<Self>> + Send {
-        Box::pin(async move {
-            unimplemented!()
-        })
+    fn link(&self) -> impl Future<Output = BinResult<Self>> + Send {
+        Box::pin(async move { unimplemented!() })
         // match self {
         //     MyData::File { .. } => {}
         //     MyData::Mem { .. } => {}

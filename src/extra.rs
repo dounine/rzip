@@ -25,14 +25,16 @@ pub enum Extra {
 impl BinWrite for Extra {
     type Args<'a> = ();
 
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
         endian: Endian,
-        _args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+        _args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
     where
-        Self: Sync,
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move {
             let mut output = Cursor::new(Vec::new());
@@ -90,13 +92,16 @@ impl BinWrite for Extra {
 }
 impl BinRead for Extra {
     type Args<'a> = ();
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
+
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
         endian: Endian,
-        _args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+        _args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
     where
-        Self: Send,
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
         async move {
             let id: u16 = reader.read_type(endian).await?;

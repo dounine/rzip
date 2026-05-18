@@ -49,14 +49,16 @@ pub enum ZipModel {
 impl BinWrite for ZipModel {
     type Args<'a> = ();
 
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl std::future::Future<Output = BinResult<()>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
     where
-        Self: Sync,
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move {
             let value: u8 = match self {
@@ -71,15 +73,17 @@ impl BinWrite for ZipModel {
 impl BinRead for ZipModel {
     type Args<'a> = ();
 
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
     where
-        Self: Send,
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
-        Box::pin(async move {
+        async move {
             let value: u8 = reader.read_type_args(endian, args).await?;
             let model = match value {
                 0x00 => Self::Parse,
@@ -93,7 +97,7 @@ impl BinRead for ZipModel {
                 }
             };
             Ok(model)
-        })
+        }
     }
 }
 // #[binrw]
@@ -106,13 +110,16 @@ pub enum Magic {
 }
 impl BinRead for Magic {
     type Args<'a> = ();
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
+
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
     where
-        Self: Send,
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
         async move {
             let value: u32 = reader.read_type_args(endian, args).await?;
@@ -134,14 +141,17 @@ impl BinRead for Magic {
 }
 impl BinWrite for Magic {
     type Args<'a> = ();
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
+
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
         endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
     where
-        Self: Sync,
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move {
             let value: u32 = match self {
@@ -166,7 +176,7 @@ impl Default for Magic {
 pub struct FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
     // #[br(calc = c.clone())]
     // #[bw(ignore)]
@@ -202,18 +212,23 @@ where
 impl<T> BinWrite for FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
-    type Args<'a> = &'a ZipModel;
-
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
-        _endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+    type Args<'a>
+        = &'a ZipModel
     where
-        Self: Sync,
+        T: 'a;
+
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
+        _endian: Endian,
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
+    where
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move {
             let model = args;
@@ -247,17 +262,22 @@ where
 impl<T> BinRead for FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + Sync + 'static,
+    T::Config: Config,
 {
-    type Args<'a> = (&'a ZipModel, &'a T::Config, &'a mut ReadBytesCallback<'a>);
-
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+    type Args<'a>
+        = (&'a ZipModel, &'a T::Config, &'a mut ReadBytesCallback<'a>)
     where
-        Self: Send,
+        T: 'a;
+
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
+        endian: Endian,
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
+    where
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
         async move {
             let (model, config, read_bytes) = args;
@@ -316,12 +336,12 @@ where
 pub struct IndexDirectory<T>(pub IndexMap<String, Directory<T>>)
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static;
+    T::Config: Config;
 
 impl<T> DerefMut for IndexDirectory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
@@ -330,7 +350,7 @@ where
 impl<T> Deref for IndexDirectory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
     type Target = IndexMap<String, Directory<T>>;
 
@@ -341,22 +361,27 @@ where
 impl<T> BinRead for IndexDirectory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + Sync + 'static,
+    T::Config: Config,
 {
-    type Args<'a> = (
+    type Args<'a>
+        = (
         &'a ZipModel,
         &'a T::Config,
         u16,
         &'a mut ReadBytesCallback<'a>,
-    );
-
-    fn read_options<R: Read + Seek + Send>(
-        reader: &mut R,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<Self>> + Send
+    )
     where
-        Self: Send,
+        T: 'a;
+
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
+        endian: Endian,
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
+    where
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
     {
         async move {
             let (model, config, count, read_bytes) = args;
@@ -379,18 +404,23 @@ where
 impl<T> BinWrite for IndexDirectory<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
+    T::Config: Config,
 {
-    type Args<'a> = (&'a ZipModel,);
-
-    fn write_options<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
-        endian: Endian,
-        args: Self::Args<'_>,
-    ) -> impl Future<Output = BinResult<()>> + Send
+    type Args<'a>
+        = (&'a ZipModel,)
     where
-        Self: Sync,
+        T: 'a;
+
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
+        endian: Endian,
+        args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
+    where
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
     {
         async move {
             let (model,) = args;
@@ -404,8 +434,7 @@ where
 impl<T> FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
-    T::Config: Config + 'static,
-    // <T::Config as Config>::Value: Display + Default + Clone,
+    T::Config: Config,
 {
     pub fn enable_crc32_computer(&mut self) {
         self.crc32_computer = true.into();
@@ -418,7 +447,6 @@ impl<T> FastZip<T>
 where
     T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config,
-    // <T::Config as Config>::Value: Display + Default + Clone,
 {
     pub fn empty() -> BinResult<FastZip<T>> {
         Ok(Self {
@@ -659,6 +687,68 @@ where
         }
     }
     #[cfg(feature = "parallel")]
+    pub async fn decompress_filter_parallel<'a, 'c: 'a, F>(
+        &'a mut self,
+        callback: &'a mut F,
+        files: &'a [String],
+    ) -> BinResult<()>
+    where
+        F: FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+    {
+        use std::collections::HashSet;
+
+        use tokio::sync::mpsc;
+        let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
+
+        let mut to_decompress = Vec::new();
+        let file_set: HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
+        for (file_name, dir) in &mut self.directories.0 {
+            if file_set.contains(file_name.as_str()) {
+                to_decompress.push(dir);
+            }
+        }
+
+        if to_decompress.is_empty() {
+            return Ok(());
+        }
+
+        let ((), results) = unsafe {
+            async_scoped::TokioScope::scope_and_collect(|scope| {
+                scope.spawn(async {
+                    while let Some(bytes) = rx.recv().await {
+                        callback(bytes).await;
+                    }
+                    Ok(())
+                });
+
+                for dir in to_decompress {
+                    let tx = tx.clone();
+                    scope.spawn(async move {
+                        let mut f = move |bytes: u64| {
+                            let tx = tx.clone();
+                            Box::pin(async move {
+                                let _ = tx.send(bytes);
+                            })
+                                as Pin<Box<dyn Future<Output = ()> + Send>>
+                        };
+                        dir.decompressed_callback(&mut f).await
+                    });
+                }
+                drop(tx);
+            })
+        }
+        .await;
+
+        for res in results {
+            res.map_err(|e| binrw::Error::Custom {
+                pos: 0,
+                err: Box::new(e),
+            })??;
+        }
+
+        Ok(())
+    }
+    #[cfg(feature = "parallel")]
     pub async fn package_parallel<'a, 'c: 'a, F>(
         &'a mut self,
         writer: &'c mut T,
@@ -666,7 +756,7 @@ where
         callback: &'a mut F,
     ) -> BinResult<()>
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>>,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
     {
         use tokio::sync::mpsc;
         let total_size = self.computer_un_compress_size().await?;
@@ -674,8 +764,17 @@ where
         let crc32 = self.crc32_computer;
         let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
 
-        let results = unsafe {
+        let (_, results) = unsafe {
             async_scoped::TokioScope::scope_and_collect(|scope| {
+                scope.spawn(async move {
+                    let mut processed = 0;
+                    while let Some(bytes) = rx.recv().await {
+                        processed += bytes;
+                        callback(total_size, processed).await;
+                    }
+                    Ok(())
+                });
+
                 for (_, dir) in &mut self.directories.0 {
                     let cfg = &cfg;
                     let tx = tx.clone();
@@ -693,16 +792,18 @@ where
                 }
                 drop(tx);
             })
-        };
-        let receive_bytes = async {
-            let mut processed = 0;
-            while let Some(bytes) = rx.recv().await {
-                processed += bytes;
-                callback(total_size, processed).await;
-            }
-            processed
-        };
-        let _result = tokio::join!(results, receive_bytes);
+        }
+        .await;
+        for res in results {
+            res.map_err(|e| binrw::Error::Custom {
+                pos: 0,
+                err: Box::new(e),
+            })?
+            .map_err(|ee| binrw::Error::Custom {
+                pos: 0,
+                err: Box::new(ee),
+            })?;
+        }
         self.package(writer, compression_level).await
     }
     pub fn package_with_callback<F>(
