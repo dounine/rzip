@@ -535,11 +535,10 @@ where
         let ratio = non_text_count as f32 / data.len() as f32;
         ratio > bin_threshold
     }
-    pub fn add_file(
-        &mut self,
+    pub fn create_dir(
         mut data: T,
         file_name: &str,
-    ) -> impl Future<Output = BinResult<()>> + Send {
+    ) -> impl Future<Output = BinResult<Directory<T>>> + Send{
         async move {
             data.seek_start().await?;
             let length = data.length().await?;
@@ -608,13 +607,17 @@ where
                 },
                 sha_value: None,
             };
-            let name = String::from_utf8(directory.file_name.inner.clone()).map_err(|e| {
-                Error::Custom {
-                    pos: 0,
-                    err: Box::new(e),
-                }
-            })?;
-            self.directories.insert(name, directory);
+            Ok(directory)
+        }
+    }
+    pub fn add_file(
+        &mut self,
+        data: T,
+        file_name: &str,
+    ) -> impl Future<Output = BinResult<()>> + Send {
+        async move {
+            let dir = Self::create_dir(data, file_name).await?;
+            self.directories.insert(file_name.to_string(), dir);
             Ok(())
         }
     }
