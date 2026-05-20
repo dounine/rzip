@@ -538,7 +538,7 @@ where
     pub fn create_dir(
         mut data: T,
         file_name: &str,
-    ) -> impl Future<Output = BinResult<Directory<T>>> + Send{
+    ) -> impl Future<Output = BinResult<Directory<T>>> + Send {
         async move {
             data.seek_start().await?;
             let length = data.length().await?;
@@ -701,7 +701,7 @@ where
         use std::collections::HashSet;
 
         use tokio::sync::mpsc;
-        let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
+        let (tx, mut rx) = mpsc::channel::<u64>(16);
 
         let mut to_decompress = Vec::new();
         let file_set: HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
@@ -730,7 +730,7 @@ where
                         let mut f = move |bytes: u64| {
                             let tx = tx.clone();
                             Box::pin(async move {
-                                let _ = tx.send(bytes);
+                                let _ = tx.send(bytes).await;
                             })
                                 as Pin<Box<dyn Future<Output = ()> + Send>>
                         };
@@ -765,7 +765,7 @@ where
         let total_size = self.computer_un_compress_size().await?;
         let cfg = writer.config().clone(); // 使用 Arc 实现真正的共享
         let crc32 = self.crc32_computer;
-        let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
+        let (tx, mut rx) = mpsc::channel::<u64>(16);
 
         let (_, results) = unsafe {
             async_scoped::TokioScope::scope_and_collect(|scope| {
@@ -785,7 +785,7 @@ where
                         let mut f = move |bytes: u64| {
                             let tx = tx.clone();
                             Box::pin(async move {
-                                let _ = tx.send(bytes);
+                                let _ = tx.send(bytes).await;
                             })
                                 as Pin<Box<dyn Future<Output = ()> + Send>>
                         };
