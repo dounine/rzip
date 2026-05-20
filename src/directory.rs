@@ -1,4 +1,5 @@
 use crate::file::{ExtraList, ZipFile};
+use crate::hash::{Crc32Reader, HashWriter, Hasher, HashWriterNull};
 use crate::zip::{Config, StreamDefault, ZipModel};
 use binrw::io::ReadBytesCallback;
 use binrw::io::read::Read;
@@ -9,7 +10,6 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Er
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
 use std::io;
-use std::io::SeekFrom;
 use std::string::FromUtf8Error;
 
 // #[binrw]
@@ -651,7 +651,6 @@ where
         async move {
             if self.compressed() {
                 let (new_data, sha) = {
-                    // let mut data = self.data.lock().await;
                     if let Some(data) = &mut self.data {
                         data.seek_start().await?;
                         let mut config = data.config().clone();
@@ -692,7 +691,6 @@ where
     }
     pub fn copy_data(&mut self) -> impl Future<Output = BinResult<Vec<u8>>> + Send {
         async move {
-            // let mut data = self.data.lock().await;
             if let Some(data) = &mut self.data {
                 let pos = data.position().await?;
                 let mut bytes = vec![];
@@ -707,15 +705,17 @@ where
             }
         }
     }
-    pub fn sha_build(&mut self) -> impl Future<Output = BinResult<([u8; 20], [u8; 32])>> + Send {
+    pub fn sha_build(
+        &mut self,
+    ) -> impl Future<Output = BinResult<([u8; 20], [u8; 32])>> + Send {
         async move {
             if let Some(data) = &mut self.data {
                 let pos = data.position().await?;
                 data.seek_start().await?;
-                let mut multi_writer = HashWriterNull::new();
-                binrw::io::copy(&mut *data, &mut multi_writer).await?;
+                let mut hasher = HashWriterNull::new();
+                binrw::io::copy(&mut *data, &mut hasher).await?;
                 data.set_position(pos).await?;
-                let sha = multi_writer.hash();
+                let sha = hasher.finalize();
                 self.sha_value = Some(sha.clone());
                 Ok(sha)
             } else {
@@ -738,7 +738,6 @@ where
                 let mut config = config.clone();
                 config.compress_size_mut(self.compressed_size as u64);
                 let compress_data = {
-                    // let mut data = self.data.lock().await;
                     if let Some(data) = &mut self.data {
                         data.seek_start().await?;
                         let uncompressed_size = data.length().await?;
@@ -807,192 +806,6 @@ where
             self.file.uncompressed_size = self.uncompressed_size;
             self.compressed = false;
             self.data = Some(stream);
-            Ok(())
-        }
-    }
-}
-// pub struct HashWriter(Sha1, Sha256);
-// impl HashWriter {
-//     pub fn new() -> Self {
-//         HashWriter(Sha1::new(), Sha256::new())
-//     }
-//     pub fn hash(self) -> (Vec<u8>, Vec<u8>) {
-//         (self.0.finalize().to_vec(), self.1.finalize().to_vec())
-//     }
-// }
-// impl Write for HashWriter {
-//     fn write(&mut self, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
-//         async move {
-//             std::io::Write::write(&mut self.0, buf)?;
-//             let size = std::io::Write::write(&mut self.1, buf)?;
-//             Ok(size)
-//         }
-//     }
-//
-//     fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send {
-//         async move {
-//             std::io::Write::flush(&mut self.0)?;
-//             std::io::Write::flush(&mut self.1)?;
-//             Ok(())
-//         }
-//     }
-// }
-
-pub struct HashWriter<T> {
-    sha1: Option<sha1::Sha1>,
-    sha256: Option<sha2::Sha256>,
-    data: T,
-}
-impl<T> HashWriter<T>
-where
-    T: Write + Seek + Send,
-{
-    pub fn new(data: T) -> Self {
-        use sha1::Digest;
-        HashWriter {
-            sha1: Some(sha1::Sha1::new()),
-            sha256: Some(sha2::Sha256::new()),
-            data,
-        }
-    }
-    pub fn hash(&mut self) -> ([u8; 20], [u8; 32]) {
-        if let (Some(sha1), Some(sha2)) = (self.sha1.take(), self.sha256.take()) {
-            use sha1::Digest;
-            let sha1_vec = sha1.finalize().to_vec();
-            let sha2_vec = sha2.finalize().to_vec();
-            let mut s1 = [0u8; 20];
-            let mut s2 = [0u8; 32];
-            s1.copy_from_slice(&sha1_vec);
-            s2.copy_from_slice(&sha2_vec);
-            return (s1, s2);
-        }
-        ([0u8; 20], [0u8; 32])
-    }
-    pub fn into_inner(self) -> T {
-        self.data
-    }
-}
-impl<T> Seek for HashWriter<T>
-where
-    T: Write + Seek + Send,
-{
-    fn seek(&mut self, pos: SeekFrom) -> impl Future<Output = std::io::Result<u64>> + Send {
-        self.data.seek(pos)
-    }
-}
-impl<T> Write for HashWriter<T>
-where
-    T: Write + Seek + Send,
-{
-    fn write(&mut self, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
-        async move {
-            let size = self.data.write(buf).await?;
-            if let (Some(sha1), Some(sha2)) = (&mut self.sha1, &mut self.sha256) {
-                std::io::Write::write_all(sha1, &buf[..size])?;
-                std::io::Write::write_all(sha2, &buf[..size])?;
-            }
-            Ok(size)
-        }
-    }
-
-    fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send {
-        async move {
-            self.data.flush().await?;
-            if let (Some(sha1), Some(sha2)) = (&mut self.sha1, &mut self.sha256) {
-                std::io::Write::flush(sha1)?;
-                std::io::Write::flush(sha2)?;
-            }
-            Ok(())
-        }
-    }
-}
-pub struct Crc32Reader<R: Read + Send> {
-    inner: R,
-    crc32: Option<crc32fast::Hasher>,
-}
-impl<T> Crc32Reader<T>
-where
-    T: Read + Send,
-{
-    pub fn new(reader: T) -> Self {
-        Crc32Reader {
-            inner: reader,
-            crc32: None,
-        }
-    }
-    pub fn init_crc32(&mut self) {
-        self.crc32 = Some(crc32fast::Hasher::new())
-    }
-    pub fn crc32(self) -> u32 {
-        if let Some(crc) = self.crc32 {
-            crc.finalize()
-        } else {
-            0
-        }
-    }
-}
-impl<T> Read for Crc32Reader<T>
-where
-    T: Read + Send,
-{
-    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send {
-        async move {
-            let size = self.inner.read(buf).await?;
-            if let Some(crc32) = &mut self.crc32 {
-                crc32.update(&buf[..size]);
-            }
-            Ok(size)
-        }
-    }
-
-    fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send {
-        self.inner.flush()
-    }
-}
-
-pub struct HashWriterNull(sha1::Sha1, sha2::Sha256);
-impl HashWriterNull {
-    pub fn new() -> Self {
-        use sha2::Digest;
-        Self {
-            0: sha1::Sha1::new(),
-            1: sha2::Sha256::new(),
-        }
-    }
-    pub fn hash(self) -> ([u8; 20], [u8; 32]) {
-        use sha1::Digest;
-        let sha1_vec = self.0.finalize().to_vec();
-        let sha2_vec = self.1.finalize().to_vec();
-        let mut s1 = [0u8; 20];
-        let mut s2 = [0u8; 32];
-        s1.copy_from_slice(&sha1_vec);
-        s2.copy_from_slice(&sha2_vec);
-        (s1, s2)
-    }
-}
-impl Seek for HashWriterNull {
-    fn seek(&mut self, _pos: SeekFrom) -> impl Future<Output = io::Result<u64>> + Send {
-        async move {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "HashWriterNull cannot call seek",
-            ))
-        }
-    }
-}
-impl Write for HashWriterNull {
-    fn write(&mut self, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
-        async move {
-            let size = std::io::Write::write(&mut self.0, buf)?;
-            std::io::Write::write_all(&mut self.1, &buf[..size])?;
-            Ok(size)
-        }
-    }
-
-    fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send {
-        async move {
-            std::io::Write::flush(&mut self.0)?;
-            std::io::Write::flush(&mut self.1)?;
             Ok(())
         }
     }
