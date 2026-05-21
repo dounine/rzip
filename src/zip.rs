@@ -485,8 +485,12 @@ where
             let total = reader.seek_end().await?;
             reader.set_position(pos).await?;
             let mut sum = 0;
-            let mut callback = Self::create_adapter(total, &mut sum, callback);
-            FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut callback)).await
+            let mut buffered = 0;
+            let mut callback = Self::create_adapter(total, &mut buffered, &mut sum, callback);
+            let result =
+                FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut callback)).await;
+            callback(0).await;
+            result
         }
     }
     // pub fn parse_from_config<R: Read + Seek>(
@@ -621,8 +625,9 @@ where
             Ok(())
         }
     }
-    fn create_adapter<'a, CB>(
+    pub fn create_adapter<'a, CB>(
         total: u64,
+        buffered: &'a mut u64,
         sum: &'a mut u64,
         mut cb: CB,
     ) -> impl FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a
@@ -630,8 +635,22 @@ where
         CB: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a,
     {
         move |bytes| {
+            if bytes == 0 {
+                if *buffered == 0 {
+                    return Box::pin(async {});
+                }
+                let result = cb(total, *sum);
+                *buffered = 0;
+                return result;
+            }
+            *buffered += bytes;
             *sum += bytes;
-            cb(total, *sum)
+            if *buffered >= 1024 * 1024 {
+                *buffered = 0;
+                cb(total, *sum)
+            } else {
+                Box::pin(async {})
+            }
         }
     }
     fn computer_un_compress_size(&mut self) -> impl Future<Output = BinResult<u64>> + Send {
@@ -641,7 +660,6 @@ where
                 total_size += if !director.compressed
                     && director.compression_method == CompressionMethod::Deflate
                 {
-                    // let mut data = director.data.lock().await;
                     if let Some(data) = &mut director.data {
                         data.length().await?
                     } else {
@@ -690,7 +708,7 @@ where
         }
     }
     #[cfg(feature = "parallel")]
-    pub async fn decompress_filter_parallel<'a, 'c: 'a, F>(
+    pub async fn decompress_filter_parallel<'a, F>(
         &'a mut self,
         callback: &'a mut F,
         files: &'a [String],
@@ -727,7 +745,7 @@ where
                 for dir in to_decompress {
                     let tx = tx.clone();
                     scope.spawn(async move {
-                        let mut f = move |bytes: u64| {
+                        let mut f = |bytes: u64| {
                             let tx = tx.clone();
                             Box::pin(async move {
                                 let _ = tx.send(bytes).await;
@@ -782,7 +800,7 @@ where
                     let cfg = &cfg;
                     let tx = tx.clone();
                     scope.spawn(async move {
-                        let mut f = move |bytes: u64| {
+                        let mut f = |bytes: u64| {
                             let tx = tx.clone();
                             Box::pin(async move {
                                 let _ = tx.send(bytes).await;
@@ -824,7 +842,9 @@ where
             let mut directors_size = 0;
             let mut binding = 0;
             let total_size = self.computer_un_compress_size().await?;
-            let mut callback = Self::create_adapter(total_size, &mut binding, callback);
+            let mut buffered = 0;
+            let mut callback =
+                Self::create_adapter(total_size, &mut buffered, &mut binding, callback);
             let crc32_computer = self.crc32_computer;
             for (_, director) in &mut self.directories.0 {
                 director
@@ -864,6 +884,7 @@ where
                 };
                 files_size += file_writer_length + file_data_length;
             }
+            callback(0).await;
             header.seek_start().await?;
             binrw::io::copy(&mut header, writer).await?;
             self.size = directors_size as u32;
