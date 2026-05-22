@@ -448,8 +448,8 @@ where
     T: Read + Write + Seek + Send + StreamDefault,
     T::Config: Config,
 {
-    pub fn empty() -> BinResult<FastZip<T>> {
-        Ok(Self {
+    pub fn empty() -> FastZip<T> {
+        Self {
             config: Default::default(),
             crc32_computer: Default::default(),
             eocd_offset: 0,
@@ -463,7 +463,7 @@ where
             comment_length: 0,
             comment: vec![],
             directories: IndexDirectory(IndexMap::new()),
-        })
+        }
     }
     pub fn parse(reader: &mut T) -> impl Future<Output = BinResult<FastZip<T>>> + Send {
         async move {
@@ -707,6 +707,69 @@ where
             .await
         }
     }
+    pub fn decompress_all_files<F>(
+        &mut self,
+        callback: &mut F,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+    {
+        async move {
+            let mut sum = 0;
+            let mut buffered = 0;
+            let mut total_bytes = 0;
+            for (_, dir) in &mut self.directories.0 {
+                total_bytes += dir.uncompressed_size as u64;
+            }
+            let mut callback = Self::create_adapter(total_bytes, &mut buffered, &mut sum, callback);
+
+            #[cfg(not(feature = "parallel"))]
+            {
+                for (_, dir) in &mut self.directories.0 {
+                    dir.decompressed_callback(&mut callback).await?;
+                }
+            }
+            #[cfg(feature = "parallel")]
+            {
+                use tokio::sync::mpsc;
+                let (tx, mut rx) = mpsc::channel::<u64>(16);
+                let ((), results) = unsafe {
+                    async_scoped::TokioScope::scope_and_collect(|scope| {
+                        scope.spawn(async {
+                            while let Some(bytes) = rx.recv().await {
+                                callback(bytes).await;
+                            }
+                            Ok(())
+                        });
+                        for (_, dir) in &mut self.directories.0 {
+                            let tx = tx.clone();
+                            scope.spawn(async move {
+                                let mut f = |bytes: u64| {
+                                    let tx = tx.clone();
+                                    Box::pin(async move {
+                                        let _ = tx.send(bytes).await;
+                                    })
+                                        as Pin<Box<dyn Future<Output = ()> + Send>>
+                                };
+                                dir.decompressed_callback(&mut f).await
+                            });
+                        }
+                        drop(tx);
+                    })
+                }
+                .await;
+                for res in results {
+                    res.map_err(|e| binrw::Error::Custom {
+                        pos: 0,
+                        err: Box::new(e),
+                    })??;
+                }
+            }
+
+            Ok(())
+        }
+    }
+
     #[cfg(feature = "parallel")]
     pub async fn decompress_filter_parallel<'a, F>(
         &'a mut self,
