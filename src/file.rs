@@ -1,6 +1,6 @@
 use crate::directory::{CompressionMethod, Name};
 use crate::extra::Extra;
-use crate::zip::ZipModel;
+use crate::zip::{ZipModel, is_dir};
 use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
@@ -41,6 +41,7 @@ pub struct ZipFile {
     // #[bw(if(*model == ZipModel::Bin))]
     pub data_position: u64,
 }
+
 impl BinWrite for ZipFile {
     type Args<'a> = (&'a ZipModel, u32);
 
@@ -58,7 +59,7 @@ impl BinWrite for ZipFile {
         async move {
             let (model, uncompressed_size) = args;
             writer.write_le(&0x04034b50_u32).await?;
-            let extract_zip_spec: u8 = if self.file_name.inner.ends_with(&[b'/']) {
+            let extract_zip_spec: u8 = if is_dir(&self.file_name.inner) {
                 0x0a
             } else {
                 0x0e
@@ -75,13 +76,13 @@ impl BinWrite for ZipFile {
             writer.write_le(&self.last_modification_time).await?;
             writer.write_le(&self.last_modification_date).await?;
             writer.write_le(&self.crc_32_uncompressed_data).await?;
-            let compressed_size = if self.file_name.inner.ends_with(&[b'/']) {
+            let compressed_size = if is_dir(&self.file_name.inner) {
                 0
             } else {
                 self.compressed_size
             };
             writer.write_le(&compressed_size).await?;
-            let uncompressed_size = if self.file_name.inner.ends_with(&[b'/']) {
+            let uncompressed_size = if is_dir(&self.file_name.inner) {
                 0
             } else {
                 self.uncompressed_size

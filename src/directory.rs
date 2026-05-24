@@ -1,6 +1,6 @@
 use crate::file::{ExtraList, ZipFile};
-use crate::hash::{Crc32Reader, HashWriter, Hasher, HashWriterNull};
-use crate::zip::{Config, StreamDefault, ZipModel};
+use crate::hash::{Crc32Reader, HashWriter, HashWriterNull, Hasher};
+use crate::zip::{Config, StreamDefault, ZipModel, is_dir};
 use binrw::io::ReadBytesCallback;
 use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
@@ -320,7 +320,7 @@ where
             .await?;
             read_bytes(reader.position().await? - pos).await;
             // reader.seek(SeekFrom::Start(pos))?;
-            let data = if !Self::is_file(&file_name) {
+            let data = if is_dir(&file_name.inner) {
                 T::from_config(config).await?
             } else {
                 if *model == ZipModel::Bin {
@@ -531,11 +531,11 @@ where
     T::Config: Config,
 {
     pub fn is_dir(&self) -> bool {
-        self.file_name.inner.ends_with(&[b'/'])
+        crate::zip::is_dir(&self.file_name.inner)
     }
-    pub fn is_file(name: &Name) -> bool {
-        !name.inner.ends_with(&[b'/'])
-    }
+    //     pub fn is_file(name: &Name) -> bool {
+    //         !name.inner.ends_with(&[b'/'])
+    //     }
 }
 
 // #[binrw::parser(reader, endian)]
@@ -705,9 +705,7 @@ where
             }
         }
     }
-    pub fn sha_build(
-        &mut self,
-    ) -> impl Future<Output = BinResult<([u8; 20], [u8; 32])>> + Send {
+    pub fn sha_build(&mut self) -> impl Future<Output = BinResult<([u8; 20], [u8; 32])>> + Send {
         async move {
             if let Some(data) = &mut self.data {
                 let pos = data.position().await?;

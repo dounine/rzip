@@ -934,7 +934,7 @@ where
                 file_writer.seek_start().await?;
                 let file_writer_length = binrw::io::copy(&mut file_writer, writer).await?;
 
-                let file_data_length = if !director.file_name.inner.ends_with(&[b'/']) {
+                let file_data_length = if !director.is_dir() {
                     // let mut data = director.data.lock().await;
                     if let Some(data) = &mut director.data {
                         data.seek_start().await?;
@@ -1031,4 +1031,8 @@ pub fn parse_eocd_offset<R: Read + Seek + Send>(
             found: Box::new("not a zip file"),
         })
     }
+}
+
+pub fn is_dir(file_name: &[u8]) -> bool {
+    matches!(file_name.last(), Some(b'/') | Some(b'\\'))
 }
