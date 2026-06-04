@@ -31,6 +31,8 @@ where
 
     #[cfg(not(feature = "use_openssl"))]
     pub fn new(data: T) -> Self {
+        use sha1::Digest;
+
         HashWriter {
             sha1: Some(sha1::Sha1::new()),
             sha256: Some(sha2::Sha256::new()),
@@ -160,7 +162,7 @@ where
 }
 pub trait Hasher: Send + binrw::io::write::Write {
     fn new() -> Self;
-    fn update(&mut self, data: &[u8]);
+    fn update(&mut self, data: &[u8])-> std::io::Result<()>;
     fn finalize(self) -> ([u8; 20], [u8; 32]);
 }
 
@@ -187,6 +189,8 @@ impl Hasher for HashWriterNull {
         }
         #[cfg(not(feature = "use_openssl"))]
         {
+            use sha1::Digest;
+
             Self {
                 sha1: sha1::Sha1::new(),
                 sha256: sha2::Sha256::new(),
@@ -194,9 +198,18 @@ impl Hasher for HashWriterNull {
         }
     }
 
-    fn update(&mut self, data: &[u8]) {
-        self.sha1.update(data);
-        self.sha256.update(data);
+    fn update(&mut self, data: &[u8]) -> std::io::Result<()> {
+        #[cfg(feature = "use_openssl")]
+        {
+            self.sha1.update(data);
+            self.sha256.update(data);
+        }
+        #[cfg(not(feature = "use_openssl"))]
+        {
+            std::io::Write::write_all(&mut self.sha1, data)?;
+            std::io::Write::write_all(&mut self.sha256, data)?;
+        }
+        Ok(())
     }
 
     fn finalize(self) -> ([u8; 20], [u8; 32]) {

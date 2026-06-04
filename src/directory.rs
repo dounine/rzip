@@ -678,6 +678,10 @@ where
                 self.sha_value = Some(sha);
                 self.data = Some(new_data);
                 self.compressed = false;
+            } else {
+                if let Some(data) = &mut self.data {
+                    data.seek_start().await?;
+                }
             }
             Ok(())
         }

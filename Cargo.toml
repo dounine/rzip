@@ -8,7 +8,7 @@ exclude = ["example"]
 [workspace]
 members = ["example", "."]
 [features]
-default = ["use_openssl"]
+default = []
 parallel = ["tokio","async-scoped"]
 use_openssl = ["openssl"]
 
