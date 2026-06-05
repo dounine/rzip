@@ -95,8 +95,9 @@ where
                 }
                 #[cfg(not(feature = "use_openssl"))]
                 {
-                    std::io::Write::write_all(sha1, &buf[..size])?;
-                    std::io::Write::write_all(sha2, &buf[..size])?;
+                    use sha1::digest::DynDigest;
+                    sha1.update(&buf[..size]);
+                    sha2.update(&buf[..size]);
                 }
             }
             Ok(size)
@@ -106,13 +107,6 @@ where
     fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
         async move {
             self.data.flush().await?;
-            if let (Some(_sha1), Some(_sha2)) = (&mut self.sha1, &mut self.sha256) {
-                #[cfg(not(feature = "use_openssl"))]
-                {
-                    std::io::Write::flush(_sha1)?;
-                    std::io::Write::flush(_sha2)?;
-                }
-            }
             Ok(())
         }
     }
@@ -162,7 +156,7 @@ where
 }
 pub trait Hasher: Send + binrw::io::write::Write {
     fn new() -> Self;
-    fn update(&mut self, data: &[u8])-> std::io::Result<()>;
+    fn update(&mut self, data: &[u8]) -> std::io::Result<()>;
     fn finalize(self) -> ([u8; 20], [u8; 32]);
 }
 
@@ -206,8 +200,10 @@ impl Hasher for HashWriterNull {
         }
         #[cfg(not(feature = "use_openssl"))]
         {
-            std::io::Write::write_all(&mut self.sha1, data)?;
-            std::io::Write::write_all(&mut self.sha256, data)?;
+            use sha1::digest::DynDigest;
+
+            self.sha1.update(data);
+            self.sha256.update(data);
         }
         Ok(())
     }
@@ -253,21 +249,15 @@ impl Write for HashWriterNull {
             }
             #[cfg(not(feature = "use_openssl"))]
             {
-                let size = std::io::Write::write(&mut self.sha1, buf)?;
-                std::io::Write::write_all(&mut self.sha256, &buf[..size])?;
-                Ok(size)
+                use sha1::digest::DynDigest;
+                self.sha1.update(buf);
+                self.sha256.update(buf);
+                Ok(buf.len())
             }
         }
     }
 
     fn flush(&mut self) -> impl Future<Output = std::io::Result<()>> + Send {
-        async move {
-            #[cfg(not(feature = "use_openssl"))]
-            {
-                std::io::Write::flush(&mut self.sha1)?;
-                std::io::Write::flush(&mut self.sha256)?;
-            }
-            Ok(())
-        }
+        async move { Ok(()) }
     }
 }

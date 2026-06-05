@@ -449,7 +449,7 @@ async fn main() {
     //     .await
     //     .unwrap();
     zip_file
-        .package_parallel(
+        .package_with_callback(
             &mut writer,
             CompressionLevel::DefaultLevel,
             &mut |total, bytes| {
