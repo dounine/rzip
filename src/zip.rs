@@ -81,7 +81,6 @@ impl BinRead for ZipModel {
     where
         'a: 'r,
         R: Read + Seek + Send,
-        Self: Send + 'a,
     {
         async move {
             let value: u8 = reader.read_type_args(endian, args).await?;
@@ -119,7 +118,6 @@ impl BinRead for Magic {
     where
         'a: 'r,
         R: Read + Seek + Send,
-        Self: Send + 'a,
     {
         async move {
             let value: u32 = reader.read_type_args(endian, args).await?;
@@ -277,7 +275,7 @@ where
     where
         'a: 'r,
         R: Read + Seek + Send,
-        Self: Send + 'a,
+        Self: 'a,
     {
         async move {
             let (model, config, read_bytes) = args;
@@ -381,7 +379,7 @@ where
     where
         'a: 'r,
         R: Read + Seek + Send,
-        Self: Send + 'a,
+        Self: 'a,
     {
         async move {
             let (model, config, count, read_bytes) = args;
@@ -719,7 +717,7 @@ where
             let mut buffered = 0;
             let mut total_bytes = 0;
             for (_, dir) in &mut self.directories.0 {
-                total_bytes += dir.uncompressed_size as u64;
+                total_bytes += dir.compressed_size as u64;
             }
             let mut callback = Self::create_adapter(total_bytes, &mut buffered, &mut sum, callback);
 
@@ -843,7 +841,7 @@ where
         F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
     {
         use tokio::sync::mpsc;
-        let total_size = self.computer_un_compress_size().await?;
+        let total_un_compress_size = self.computer_un_compress_size().await?;
         let cfg = writer.config().clone(); // 使用 Arc 实现真正的共享
         let crc32 = self.crc32_computer;
         let (tx, mut rx) = mpsc::channel::<u64>(16);
@@ -854,7 +852,7 @@ where
                     let mut processed = 0;
                     while let Some(bytes) = rx.recv().await {
                         processed += bytes;
-                        callback(total_size, processed).await;
+                        callback(total_un_compress_size, processed).await;
                     }
                     Ok(())
                 });
@@ -904,10 +902,14 @@ where
             let mut files_size = 0;
             let mut directors_size = 0;
             let mut binding = 0;
-            let total_size = self.computer_un_compress_size().await?;
+            let total_un_compress_size = self.computer_un_compress_size().await?;
             let mut buffered = 0;
-            let mut callback =
-                Self::create_adapter(total_size, &mut buffered, &mut binding, callback);
+            let mut callback = Self::create_adapter(
+                total_un_compress_size,
+                &mut buffered,
+                &mut binding,
+                callback,
+            );
             let crc32_computer = self.crc32_computer;
             for (_, director) in &mut self.directories.0 {
                 director
