@@ -733,14 +733,14 @@ where
         config: &'a T::Config,
         crc32_computer: bool,
         compression_level: CompressionLevel,
-        callback_fun: &'a mut ReadBytesCallback<'a>,
+        callback: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             if !self.compressed && self.compression_method == CompressionMethod::Deflate {
                 let mut config = config.clone();
                 config.compress_size_mut(self.compressed_size as u64);
                 let compress_data = {
-                    if let Some(data) = &mut self.data {
+                    if let Some(mut data) = self.data.take() {
                         data.seek_start().await?;
                         let uncompressed_size = data.length().await?;
                         self.crc_32_uncompressed_data = 0; //crc32 设置为0也能安装，网页可以忽略计算加快速度
@@ -750,25 +750,25 @@ where
                         let mut config = config.clone();
                         config.compress_size_mut(self.compressed_size as u64);
                         let mut compress_data = T::from_config(&config).await?;
+                        let mut crc32_reader = Crc32Reader::new(data);
+                        if crc32_computer {
+                            crc32_reader.init_crc32();
+                        }
                         if uncompressed_size > 0 {
-                            let mut crc32_reader = Crc32Reader::new(data);
-                            if crc32_computer {
-                                crc32_reader.init_crc32();
-                            }
                             miniz_oxide::deflate::stream::compress_stream_callback(
                                 &mut crc32_reader,
                                 &mut compress_data,
                                 compression_level,
-                                callback_fun,
+                                callback,
                             )
                             .await
                             .map_err(|e| Error::Custom {
                                 pos: 0,
                                 err: Box::new(e),
                             })?;
-                            self.crc_32_uncompressed_data = crc32_reader.crc32();
-                            self.file.crc_32_uncompressed_data = self.crc_32_uncompressed_data;
                         }
+                        self.crc_32_uncompressed_data = crc32_reader.crc32();
+                        self.file.crc_32_uncompressed_data = self.crc_32_uncompressed_data;
                         self.compressed_size = compress_data.length().await? as u32;
                         self.file.compressed_size = self.compressed_size;
                         compress_data.seek_start().await?;

@@ -840,6 +840,8 @@ where
     where
         F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
     {
+        use std::time::Instant;
+
         use tokio::sync::mpsc;
         let total_un_compress_size = self.computer_un_compress_size().await?;
         let cfg = writer.config().clone(); // 使用 Arc 实现真正的共享
@@ -886,7 +888,10 @@ where
                 err: Box::new(ee),
             })?;
         }
-        self.package(writer, compression_level).await
+        let time = Instant::now();
+        self.package(writer, compression_level).await?;
+        println!("package us {:?}", time.elapsed());
+        Ok(())
     }
     pub fn package_with_callback<F>(
         &mut self,
@@ -937,7 +942,6 @@ where
                 let file_writer_length = binrw::io::copy(&mut file_writer, writer).await?;
 
                 let file_data_length = if !director.is_dir() {
-                    // let mut data = director.data.lock().await;
                     if let Some(data) = &mut director.data {
                         data.seek_start().await?;
                         binrw::io::copy(data, writer).await?
