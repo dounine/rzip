@@ -888,10 +888,7 @@ where
                 err: Box::new(ee),
             })?;
         }
-        let time = Instant::now();
-        self.package(writer, compression_level).await?;
-        println!("package us {:?}", time.elapsed());
-        Ok(())
+        self.package(writer, compression_level).await
     }
     pub fn package_with_callback<F>(
         &mut self,
