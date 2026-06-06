@@ -840,8 +840,6 @@ where
     where
         F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
     {
-        use std::time::Instant;
-
         use tokio::sync::mpsc;
         let total_un_compress_size = self.computer_un_compress_size().await?;
         let cfg = writer.config().clone(); // 使用 Arc 实现真正的共享
