@@ -730,7 +730,12 @@ where
             #[cfg(feature = "parallel")]
             {
                 use tokio::sync::mpsc;
-                let (tx, mut rx) = mpsc::channel::<u64>(16);
+                let (tx, mut rx) = mpsc::channel::<u64>(1024);
+                let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(4),
+                ));
                 let ((), results) = unsafe {
                     async_scoped::TokioScope::scope_and_collect(|scope| {
                         scope.spawn(async {
@@ -739,9 +744,14 @@ where
                             }
                             Ok(())
                         });
-                        for (_, dir) in &mut self.directories.0 {
+                        let mut sorted_dirs: Vec<_> = self.directories.0.values_mut().collect();
+                        sorted_dirs.sort_by(|a, b| b.compressed_size.cmp(&a.compressed_size));
+
+                        for dir in sorted_dirs {
                             let tx = tx.clone();
+                            let semaphore = semaphore.clone();
                             scope.spawn(async move {
+                                let _permit = semaphore.acquire().await.ok();
                                 let mut f = |bytes: u64| {
                                     let tx = tx.clone();
                                     Box::pin(async move {
@@ -780,7 +790,12 @@ where
         use std::collections::HashSet;
 
         use tokio::sync::mpsc;
-        let (tx, mut rx) = mpsc::channel::<u64>(16);
+        let (tx, mut rx) = mpsc::channel::<u64>(1024);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
+        ));
 
         let mut to_decompress = Vec::new();
         let file_set: HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
@@ -794,6 +809,8 @@ where
             return Ok(());
         }
 
+        to_decompress.sort_by(|a, b| b.compressed_size.cmp(&a.compressed_size));
+
         let ((), results) = unsafe {
             async_scoped::TokioScope::scope_and_collect(|scope| {
                 scope.spawn(async {
@@ -805,7 +822,9 @@ where
 
                 for dir in to_decompress {
                     let tx = tx.clone();
+                    let semaphore = semaphore.clone();
                     scope.spawn(async move {
+                        let _permit = semaphore.acquire().await.ok();
                         let mut f = |bytes: u64| {
                             let tx = tx.clone();
                             Box::pin(async move {
@@ -835,6 +854,7 @@ where
         &'a mut self,
         writer: &'c mut T,
         compression_level: CompressionLevel,
+        large_file_speed: u32,
         callback: &'a mut F,
     ) -> BinResult<()>
     where
@@ -844,7 +864,12 @@ where
         let total_un_compress_size = self.computer_un_compress_size().await?;
         let cfg = writer.config().clone(); // 使用 Arc 实现真正的共享
         let crc32 = self.crc32_computer;
-        let (tx, mut rx) = mpsc::channel::<u64>(16);
+        let (tx, mut rx) = mpsc::channel::<u64>(1024);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
+        ));
 
         let (_, results) = unsafe {
             async_scoped::TokioScope::scope_and_collect(|scope| {
@@ -857,10 +882,23 @@ where
                     Ok(())
                 });
 
-                for (_, dir) in &mut self.directories.0 {
+                //大文件在前
+                let mut sorted_dirs: Vec<_> = self.directories.0.values_mut().collect();
+                sorted_dirs.sort_by(|a, b| b.compressed_size.cmp(&a.compressed_size));
+
+                let mut i = 0;
+                for dir in sorted_dirs {
                     let cfg = &cfg;
                     let tx = tx.clone();
+                    let semaphore = semaphore.clone();
+                    let compression_level = if i < large_file_speed {
+                        CompressionLevel::BestSpeed
+                    } else {
+                        compression_level
+                    };
+                    i += 1;
                     scope.spawn(async move {
+                        let _permit = semaphore.acquire().await.ok();
                         let mut f = |bytes: u64| {
                             let tx = tx.clone();
                             Box::pin(async move {
@@ -921,20 +959,19 @@ where
                     )
                     .await?;
                 director.offset_of_local_file_header = files_size as u32;
-                let mut directory_writer = writer.from().await?;
-                directory_writer
-                    .write_le_args(director, (&ZipModel::Parse,))
-                    .await?;
-                directory_writer.seek_start().await?;
-                directors_size += binrw::io::copy(&mut directory_writer, &mut header).await?;
 
-                let mut file_writer = writer.from().await?; // T::from_config(config)?;
+                let header_pos_before = header.position().await?;
+                header.write_le_args(director, (&ZipModel::Parse,)).await?;
+                let header_pos_after = header.position().await?;
+                directors_size += header_pos_after - header_pos_before;
+
+                let writer_pos_before = writer.position().await?;
                 let file = &director.file;
-                file_writer
-                    .write_le_args(&file, (&ZipModel::Parse, director.uncompressed_size))
+                writer
+                    .write_le_args(file, (&ZipModel::Parse, director.uncompressed_size))
                     .await?;
-                file_writer.seek_start().await?;
-                let file_writer_length = binrw::io::copy(&mut file_writer, writer).await?;
+                let writer_pos_after = writer.position().await?;
+                let file_writer_length = writer_pos_after - writer_pos_before;
 
                 let file_data_length = if !director.is_dir() {
                     if let Some(data) = &mut director.data {
