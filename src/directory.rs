@@ -306,6 +306,12 @@ where
             let _external_file_attributes: u32 = reader.read_le().await?;
             let offset_of_local_file_header: u32 = reader.read_le().await?;
             let file_name: Name = reader.read_le_args(file_name_length).await?;
+                        let file_name_str = String::from_utf8_lossy(&file_name.inner)
+                            .to_string()
+                            .replace("\\", "/");
+                        let file_name = Name {
+                            inner: file_name_str.as_bytes().to_vec(),
+                        };
             let extra_fields: ExtraList = reader.read_le_args(extra_field_length).await?;
             let file_comment: Vec<u8> = reader
                 .read_le_args((file_comment_length as u64, ()))

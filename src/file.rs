@@ -134,6 +134,14 @@ impl BinRead for ZipFile {
             let file_name_length: u16 = reader.read_le().await?;
             let extra_field_length: u16 = reader.read_le().await?;
             let file_name: Name = reader.read_le_args(file_name_length).await?;
+            let file_name_str = String::from_utf8_lossy(&file_name.inner)
+                .to_string()
+                .replace("\\", "/");
+            let file_name = Name {
+                inner: file_name_str.as_bytes().to_vec(),
+            };
+
+            // 把\替换成/
             let extra_fields: ExtraList = reader.read_le_args(extra_field_length).await?;
             let data_position: u64 = data_position_parse(reader, endian, model).await?;
             Ok(Self {
