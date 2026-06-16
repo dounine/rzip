@@ -1,4 +1,4 @@
-use crate::file::{ExtraList, ZipFile};
+use crate::file::{DataDescriptor, ExtraList, ZipFile};
 use crate::hash::{Crc32Reader, HashWriter, HashWriterNull, Hasher};
 use crate::zip::{Config, StreamDefault, ZipModel, is_dir};
 use binrw::io::ReadBytesCallback;
@@ -196,7 +196,7 @@ where
     pub extract_zip_spec: u8,
     pub extract_os: u8,
     // #[bw(calc = 0)]
-    // pub _flags: u16,
+    pub flags: u16,
     // #[bw(map = |value| if *uncompressed_size == 0 {CompressionMethod::Store}else{value.clone()})]
     pub compression_method: CompressionMethod,
     // #[br(parse_with = compressed_parse,args(&model,&compression_method))]
@@ -284,7 +284,7 @@ where
             let created_os: u8 = reader.read_le().await?;
             let extract_zip_spec: u8 = reader.read_le().await?;
             let extract_os: u8 = reader.read_le().await?;
-            let _flags: u16 = reader.read_le().await?;
+            let flags: u16 = reader.read_le().await?;
             let compression_method: CompressionMethod = reader.read_le().await?;
             let compressed: bool =
                 compressed_parse(reader, endian, &model, &compression_method).await?;
@@ -295,8 +295,8 @@ where
             };
             let last_modification_time: u16 = reader.read_le().await?;
             let last_modification_date: u16 = reader.read_le().await?;
-            let crc_32_uncompressed_data: u32 = reader.read_le().await?;
-            let compressed_size: u32 = reader.read_le().await?;
+            let mut crc_32_uncompressed_data: u32 = reader.read_le().await?;
+            let mut compressed_size: u32 = reader.read_le().await?;
             let uncompressed_size: u32 = reader.read_le().await?;
             let file_name_length: u16 = reader.read_le().await?;
             let extra_field_length: u16 = reader.read_le().await?;
@@ -306,17 +306,17 @@ where
             let _external_file_attributes: u32 = reader.read_le().await?;
             let offset_of_local_file_header: u32 = reader.read_le().await?;
             let file_name: Name = reader.read_le_args(file_name_length).await?;
-                        let file_name_str = String::from_utf8_lossy(&file_name.inner)
-                            .to_string()
-                            .replace("\\", "/");
-                        let file_name = Name {
-                            inner: file_name_str.as_bytes().to_vec(),
-                        };
+            let file_name_str = String::from_utf8_lossy(&file_name.inner)
+                .to_string()
+                .replace("\\", "/");
+            let file_name = Name {
+                inner: file_name_str.as_bytes().to_vec(),
+            };
             let extra_fields: ExtraList = reader.read_le_args(extra_field_length).await?;
             let file_comment: Vec<u8> = reader
                 .read_le_args((file_comment_length as u64, ()))
                 .await?;
-            let file: ZipFile = zip_file_parse(
+            let mut file: ZipFile = zip_file_parse(
                 reader,
                 endian,
                 &model,
@@ -364,6 +364,19 @@ where
                         read_bytes(compressed_size as u64).await;
                     }
                     data.seek_start().await?;
+                    let data_descriptor: Option<DataDescriptor> = if file.flags & 0x0008 != 0 {
+                        //TODO数据是流式的
+                        Some(reader.read_le().await?)
+                    } else {
+                        None
+                    };
+                    if let Some(data_descriptor) = &data_descriptor {
+                        compressed_size = data_descriptor.compressed_size;
+                        crc_32_uncompressed_data = data_descriptor.crc32;
+                        file.compressed_size = data_descriptor.compressed_size;
+                        file.crc_32_uncompressed_data = crc_32_uncompressed_data;
+                    }
+                    file.data_descriptor = data_descriptor;
                     if *model == ZipModel::Parse {
                         reader.set_position(pos).await?;
                     }
@@ -375,6 +388,7 @@ where
                 created_os,
                 extract_zip_spec,
                 extract_os,
+                flags,
                 compression_method,
                 compressed,
                 sha_value,
@@ -423,7 +437,12 @@ where
             writer.write_le(&self.created_os).await?;
             writer.write_le(&self.extract_zip_spec).await?;
             writer.write_le(&self.extract_os).await?;
-            writer.write_le(&0_u16).await?; //flags
+            let flags = if is_dir(&self.file_name.inner) {
+                0
+            } else {
+                self.flags
+            };
+            writer.write_le(&flags).await?; //flags
             writer
                 .write_le(if self.uncompressed_size == 0 {
                     &CompressionMethod::Store
@@ -505,6 +524,7 @@ where
                     created_os: self.created_os,
                     extract_zip_spec: self.extract_zip_spec,
                     extract_os: self.extract_os,
+                    flags: self.flags,
                     compression_method: self.compression_method.clone(),
                     compressed: self.compressed,
                     sha_value: None,
@@ -789,6 +809,59 @@ where
                 self.compressed = true;
             }
             Ok(())
+        }
+    }
+    pub fn compress_to_writer_callback<'a>(
+        &'a mut self,
+        config: &'a T::Config,
+        crc32_computer: bool,
+        compression_level: CompressionLevel,
+        writer: &'a mut T,
+        callback: &'a mut ReadBytesCallback<'a>,
+    ) -> impl Future<Output = BinResult<Option<(u32, u32)>>> + Send {
+        async move {
+            if !self.compressed && self.compression_method == CompressionMethod::Deflate {
+                let mut config = config.clone();
+                config.compress_size_mut(self.compressed_size as u64);
+                let result = if let Some(mut data) = self.data.take() {
+                    data.seek_start().await?;
+                    let uncompressed_size = data.length().await?;
+                    self.crc_32_uncompressed_data = 0;
+                    self.file.crc_32_uncompressed_data = 0;
+                    self.uncompressed_size = uncompressed_size as u32;
+                    self.file.uncompressed_size = uncompressed_size as u32;
+                    let mut config = config.clone();
+                    config.compress_size_mut(self.compressed_size as u64);
+                    let mut crc32_reader = Crc32Reader::new(data);
+                    if crc32_computer {
+                        crc32_reader.init_crc32();
+                    }
+                    let pos = writer.position().await?;
+                    if uncompressed_size > 0 {
+                        miniz_oxide::deflate::stream::compress_stream_callback(
+                            &mut crc32_reader,
+                            writer,
+                            compression_level,
+                            callback,
+                        )
+                        .await
+                        .map_err(|e| Error::Custom {
+                            pos: 0,
+                            err: Box::new(e),
+                        })?;
+                    }
+                    let compress_size = writer.position().await? - pos;
+                    Some((crc32_reader.crc32(), compress_size as u32))
+                } else {
+                    self.crc_32_uncompressed_data = 0;
+                    self.file.crc_32_uncompressed_data = 0;
+                    None
+                };
+                self.compressed = true;
+                Ok(result)
+            } else {
+                Ok(None)
+            }
         }
     }
     pub fn compress(

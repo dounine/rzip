@@ -8,6 +8,7 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, SeekFrom};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -79,6 +80,10 @@ impl Config for MyStreamConfig {
 
     fn un_compress_size_mut(&mut self, value: u64) {
         self.un_compress_size = Some(value);
+    }
+
+    fn temp_dir(&self) -> Option<PathBuf> {
+        None
     }
 }
 impl BinWrite for MyStreamConfig {
@@ -336,7 +341,7 @@ impl Seek for MyData {
 }
 #[tokio::main]
 async fn main() {
-    let data = fs::File::open("./data/SideStore.ipa".to_string()).unwrap();
+    let data = fs::File::open("./data/hello.zip".to_string()).unwrap();
     // let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
     // let data = File::open("./data/SideStore.ipa").unwrap();
     let source = Arc::new(data);
@@ -449,7 +454,7 @@ async fn main() {
     //     .await
     //     .unwrap();
     zip_file
-        .package_with_callback(
+        .package_with_stream_callback(
             &mut writer,
             CompressionLevel::DefaultLevel,
             &mut |total, bytes| {

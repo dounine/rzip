@@ -7,6 +7,58 @@ use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian};
 use std::io::Cursor;
 
+#[derive(Debug, Clone)]
+pub struct DataDescriptor {
+    pub crc32: u32,
+    pub compressed_size: u32,
+    pub uncompressed_size: u32,
+}
+impl BinWrite for DataDescriptor {
+    type Args<'a> = ();
+
+    fn write_options<'a, 'w, W>(
+        &'a self,
+        writer: &'w mut W,
+        _endian: Endian,
+        _args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send + 'w
+    where
+        'a: 'w,
+        W: Write + Seek + Send,
+        Self: Sync + 'a,
+    {
+        async move {
+            writer.write_le(&0x08074b50_u32).await?;
+            writer.write_le(&self.crc32).await?;
+            writer.write_le(&self.compressed_size).await?;
+            writer.write_le(&self.uncompressed_size).await?;
+            Ok(())
+        }
+    }
+}
+impl BinRead for DataDescriptor {
+    type Args<'a> = ();
+
+    fn read_options<'a, 'r, R>(
+        reader: &'r mut R,
+        _endian: Endian,
+        _args: Self::Args<'a>,
+    ) -> impl Future<Output = BinResult<Self>> + Send + 'r
+    where
+        'a: 'r,
+        R: Read + Seek + Send,
+        Self: Send + 'a,
+    {
+        async move {
+            let _signature: u32 = reader.read_le().await?;
+            Ok(Self {
+                crc32: reader.read_le().await?,
+                compressed_size: reader.read_le().await?,
+                uncompressed_size: reader.read_le().await?,
+            })
+        }
+    }
+}
 // #[binrw]
 // #[brw(little, magic = 0x04034b50_u32, import(model:&ZipModel,uncompressed_size:u32))]
 #[derive(Clone)]
@@ -16,7 +68,7 @@ pub struct ZipFile {
     pub extract_os: u8,
     // #[br(map = |flags:u16| if flags & 0x0008 != 0 { 0 } else { flags })]
     // #[bw(calc = 0)]
-    // pub flags: u16,
+    pub flags: u16,
     // #[br(map = |value| if uncompressed_size == 0 {CompressionMethod::Store}else{value})]
     // #[bw(map = |value| if *uncompressed_size == 0 {CompressionMethod::Store}else{value.clone()})]
     pub compression_method: CompressionMethod,
@@ -36,7 +88,7 @@ pub struct ZipFile {
     // #[br(args(extra_field_length))]
     // #[bw(write_with = extra_fields_write, args(file_name.inner.ends_with(&[b'/'])))]
     pub extra_fields: ExtraList,
-    // pub data_descriptor: Option<DataDescriptor>,
+    pub data_descriptor: Option<DataDescriptor>,
     // #[br(parse_with = data_position_parse,args(model))]
     // #[bw(if(*model == ZipModel::Bin))]
     pub data_position: u64,
@@ -66,7 +118,12 @@ impl BinWrite for ZipFile {
             };
             writer.write_le(&extract_zip_spec).await?;
             writer.write_le(&self.extract_os).await?;
-            writer.write_le(&0_u16).await?;
+            let flags = if is_dir(&self.file_name.inner) {
+                0
+            } else {
+                self.flags
+            };
+            writer.write_le(&flags).await?;
             let compression_method = if uncompressed_size == 0 {
                 &CompressionMethod::Store
             } else {
@@ -120,7 +177,7 @@ impl BinRead for ZipFile {
             assert_eq!(magic, 0x04034b50_u32);
             let extract_zip_spec: u8 = reader.read_le().await?;
             let extract_os: u8 = reader.read_le().await?;
-            let _flags: u16 = reader.read_le().await?;
+            let flags: u16 = reader.read_le().await?;
             // let flags = if flags & 0x0008 != 0 { 0 } else { flags };
             let mut compression_method: CompressionMethod = reader.read_le().await?;
             if uncompressed_size == 0 {
@@ -147,7 +204,7 @@ impl BinRead for ZipFile {
             Ok(Self {
                 extract_zip_spec,
                 extract_os,
-                // flags,
+                flags,
                 compression_method,
                 last_modification_time,
                 last_modification_date,
@@ -158,6 +215,7 @@ impl BinRead for ZipFile {
                 extra_field_length,
                 file_name,
                 extra_fields,
+                data_descriptor: None,
                 data_position,
             })
         }
