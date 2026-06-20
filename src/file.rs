@@ -13,6 +13,9 @@ pub struct DataDescriptor {
     pub compressed_size: u32,
     pub uncompressed_size: u32,
 }
+impl DataDescriptor {
+    const MAGIC: u32 = 0x08074b50_u32;
+}
 impl BinWrite for DataDescriptor {
     type Args<'a> = ();
 
@@ -28,7 +31,7 @@ impl BinWrite for DataDescriptor {
         Self: Sync + 'a,
     {
         async move {
-            writer.write_le(&0x08074b50_u32).await?;
+            writer.write_le(&DataDescriptor::MAGIC).await?;
             writer.write_le(&self.crc32).await?;
             writer.write_le(&self.compressed_size).await?;
             writer.write_le(&self.uncompressed_size).await?;

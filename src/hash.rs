@@ -154,6 +154,15 @@ where
         self.inner.flush()
     }
 }
+
+impl<T> Seek for Crc32Reader<T>
+where
+    T: Read + Seek + Send,
+{
+    fn seek(&mut self, pos: SeekFrom) -> impl Future<Output = std::io::Result<u64>> + Send {
+        self.inner.seek(pos)
+    }
+}
 pub trait Hasher: Send + binrw::io::write::Write {
     fn new() -> Self;
     fn update(&mut self, data: &[u8]) -> std::io::Result<()>;

@@ -670,6 +670,53 @@ where
     pub fn compressed(&self) -> bool {
         self.compressed
     }
+    pub fn decompressed_with_writer_callback<'a, TT>(
+        &mut self,
+        writer: &'a mut TT,
+        callback_fun: &'a mut ReadBytesCallback<'a>,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        TT: binrw::io::Write + binrw::io::Seek + Send,
+    {
+        async move {
+            if self.compressed() {
+                // let (new_data, sha) = {
+                if let Some(data) = &mut self.data {
+                    data.seek_start().await?;
+                    let mut config = data.config().clone();
+                    let length = data.length().await?;
+                    config.compress_size_mut(length);
+                    // let new_data = T::from_config(&config).await?;
+                    // let mut hash_writer = HashWriter::new(new_data);
+                    decompress_stream_callback(&mut *data, writer, callback_fun)
+                        .await
+                        .map_err(|e| Error::Custom {
+                            pos: 0,
+                            err: Box::new(e),
+                        })?;
+                    // let value = hash_writer.hash();
+                    // let mut new_data = hash_writer.into_inner();
+                    writer.seek_start().await?;
+                    // (new_data, value)
+                } else {
+                    return Err(Error::AssertFail {
+                        pos: 0,
+                        message: "compressed data is none".to_string(),
+                    });
+                }
+                // };
+                // self.sha_value = Some(sha);
+                // self.data = Some(new_data);
+                self.compressed = false;
+            } else {
+                if let Some(data) = &mut self.data {
+                    data.seek_start().await?;
+                    binrw::io::copy(data, writer).await?;
+                }
+            }
+            Ok(())
+        }
+    }
     pub fn decompressed_callback<'a>(
         &mut self,
         callback_fun: &'a mut ReadBytesCallback<'a>,

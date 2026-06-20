@@ -8,8 +8,10 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Er
 use core::fmt::Display;
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
+use std::fs::{File, OpenOptions};
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::pin::Pin;
 
 pub trait Config: Display + Sync + Send + Clone + Default {
@@ -498,6 +500,163 @@ where
     // ) -> BinResult<FastZip<T>> {
     //     FastZip::read_le_args(reader, (ZipModel::Parse, config))
     // }
+    /// 解压到output，目录不存在则创建
+    pub fn unzip<'a, F>(
+        &mut self,
+        output: &'a Path,
+        callback: &'a mut F,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+    {
+        async move {
+            if !output.exists() {
+                std::fs::create_dir_all(output)?;
+            }
+            let mut total_bytes = 0;
+            for (_, dir) in &mut self.directories.0 {
+                if dir.compressed
+                    && let Some(data) = &mut dir.data
+                {
+                    total_bytes += data.length().await?;
+                }
+            }
+
+            let time = std::time::Instant::now();
+
+            #[cfg(feature = "parallel")]
+            {
+                use tokio::sync::mpsc;
+                use tracing::debug;
+                let (tx, mut rx) = mpsc::channel::<u64>(1024);
+                let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(4),
+                ));
+                let (_, results) = unsafe {
+                    async_scoped::TokioScope::scope_and_collect(|scope| {
+                        scope.spawn(async move {
+                            let mut processed = 0;
+                            while let Some(bytes) = rx.recv().await {
+                                processed += bytes;
+                                callback(total_bytes, processed).await;
+                            }
+                            Ok(())
+                        });
+                        for (file_name, dir) in &mut self.directories.0 {
+                            let tx = tx.clone();
+                            let semaphore = semaphore.clone();
+                            scope.spawn(async move {
+                                let file_path = output.join(file_name);
+                                if dir.is_dir() {
+                                    tokio::fs::create_dir_all(&file_path)
+                                        .await
+                                        .map_err(|e| Error::Io(e))
+                                } else {
+                                    let _permit = semaphore.acquire().await.ok();
+                                    let mut callback = |bytes: u64| {
+                                        let tx = tx.clone();
+                                        Box::pin(async move {
+                                            let _ = tx.send(bytes).await;
+                                        })
+                                            as Pin<Box<dyn Future<Output = ()> + Send>>
+                                    };
+                                    // dir.decompressed_callback(
+                                    //     // &mut file,
+                                    //     &mut callback,
+                                    // )
+                                    // .await?;
+                                    if let Some(_data) = &mut dir.data {
+                                        // 确保文件的父目录存在
+                                        if let Some(parent_dir) = file_path.parent() {
+                                            if !parent_dir.exists() {
+                                                tokio::fs::create_dir_all(parent_dir).await?;
+                                            }
+                                        }
+                                        let mut file = OpenOptions::new()
+                                            .read(true)
+                                            .write(true)
+                                            .create(true)
+                                            .truncate(true)
+                                            .open(file_path)?;
+                                        // file.set_len(data.length().await?)?;
+                                        // let mut mmap = unsafe {
+                                        //     use memmap2::MmapMut;
+                                        //     MmapMut::map_mut(&file)?
+                                        // };
+                                        // let mut pos = 0;
+                                        // let mut buf = [0u8; 1024 * 8];
+                                        // loop {
+                                        //     let len = data.read(&mut buf).await?;
+                                        //     if len == 0 {
+                                        //         break;
+                                        //     }
+                                        //     mmap[pos..pos + len].copy_from_slice(&buf[..len]);
+                                        //     pos += len;
+                                        // }
+                                        // mmap.flush()?;
+                                        // binrw::io::copy(reader, writer)
+
+                                        dir.decompressed_with_writer_callback(
+                                            &mut file,
+                                            &mut callback,
+                                        )
+                                        .await?;
+                                    }
+                                    Ok(())
+                                }
+                            });
+                        }
+                        drop(tx);
+                    })
+                }
+                .await;
+
+                for res in results {
+                    res.map_err(|e| binrw::Error::Custom {
+                        pos: 0,
+                        err: Box::new(e),
+                    })??;
+                }
+                debug!("parallel unzip finished in {:?}", time.elapsed());
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                use tracing::debug;
+
+                let mut sum = 0;
+                let mut buffered = 0;
+                let mut callback =
+                    Self::create_adapter(total_bytes, &mut buffered, &mut sum, callback);
+
+                for (file_name, dir) in &mut self.directories.0 {
+                    let file_path = output.join(file_name);
+                    if dir.is_dir() {
+                        std::fs::create_dir_all(&file_path)?;
+                    } else {
+                        dir.decompressed_callback(&mut callback).await?;
+                        if let Some(data) = &mut dir.data {
+                            // 确保文件的父目录存在
+                            if let Some(parent_dir) = file_path.parent() {
+                                if !parent_dir.exists() {
+                                    std::fs::create_dir_all(parent_dir)?;
+                                }
+                            }
+                            let mut file = OpenOptions::new()
+                                .write(true)
+                                .create(true)
+                                .truncate(true)
+                                .open(file_path)?;
+                            binrw::io::copy(data, &mut file).await?;
+                        }
+                    }
+                }
+                debug!("single unzip finished in {:?}", time.elapsed());
+            }
+            Ok(())
+        }
+    }
     pub fn remove_file(&mut self, file_name: &str) {
         self.directories.swap_remove(file_name);
     }
