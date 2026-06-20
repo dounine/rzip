@@ -8,7 +8,7 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Er
 use core::fmt::Display;
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
-use std::fs::{File, OpenOptions};
+use std::fs::{OpenOptions};
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
@@ -522,12 +522,9 @@ where
                 }
             }
 
-            let time = std::time::Instant::now();
-
             #[cfg(feature = "parallel")]
             {
                 use tokio::sync::mpsc;
-                use tracing::debug;
                 let (tx, mut rx) = mpsc::channel::<u64>(1024);
                 let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
                     std::thread::available_parallelism()
@@ -619,12 +616,9 @@ where
                         err: Box::new(e),
                     })??;
                 }
-                debug!("parallel unzip finished in {:?}", time.elapsed());
             }
             #[cfg(not(feature = "parallel"))]
             {
-                use tracing::debug;
-
                 let mut sum = 0;
                 let mut buffered = 0;
                 let mut callback =
@@ -652,7 +646,6 @@ where
                         }
                     }
                 }
-                debug!("single unzip finished in {:?}", time.elapsed());
             }
             Ok(())
         }
