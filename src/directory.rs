@@ -9,7 +9,6 @@ use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
-use std::io;
 use std::string::FromUtf8Error;
 
 // #[binrw]
@@ -98,13 +97,10 @@ impl BinRead for CompressionMethod {
                 0x0062 => Self::PPMd,
                 0x0063 => Self::AES,
                 _ => {
-                    return Err(Error::Custom {
-                        pos: reader.position().await?,
-                        err: Box::new(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "invalid compression method",
-                        )),
-                    });
+                    return Err(Error::BadMagic(
+                        reader.position().await?,
+                        "invalid compression method".to_string(),
+                    ));
                 }
             };
             Ok(value)
@@ -172,11 +168,8 @@ impl From<&str> for Name {
     }
 }
 impl Name {
-    pub fn into_string(self, pos: u64) -> BinResult<String> {
-        self.clone().try_into().map_err(|e| Error::Custom {
-            pos,
-            err: Box::new(e),
-        })
+    pub fn into_string(self, _pos: u64) -> BinResult<String> {
+        self.clone().try_into().map_err(|e| Error::Err(Box::new(e)))
     }
 }
 impl TryInto<String> for Name {
@@ -543,10 +536,7 @@ where
                     data: Some(new_data),
                 })
             } else {
-                Err(Error::AssertFail {
-                    pos: 0,
-                    message: "directory data is none".to_string(),
-                })
+                Err(Error::AssertFail("directory data is none".to_string()))
             }
         })
     }
@@ -690,19 +680,13 @@ where
                     // let mut hash_writer = HashWriter::new(new_data);
                     decompress_stream_callback(&mut *data, writer, callback_fun)
                         .await
-                        .map_err(|e| Error::Custom {
-                            pos: 0,
-                            err: Box::new(e),
-                        })?;
+                        .map_err(|e| Error::Err(Box::new(e)))?;
                     // let value = hash_writer.hash();
                     // let mut new_data = hash_writer.into_inner();
                     writer.seek_start().await?;
                     // (new_data, value)
                 } else {
-                    return Err(Error::AssertFail {
-                        pos: 0,
-                        message: "compressed data is none".to_string(),
-                    });
+                    return Err(Error::AssertFail("compressed data is none".to_string()));
                 }
                 // };
                 // self.sha_value = Some(sha);
@@ -733,19 +717,13 @@ where
                         let mut hash_writer = HashWriter::new(new_data);
                         decompress_stream_callback(&mut *data, &mut hash_writer, callback_fun)
                             .await
-                            .map_err(|e| Error::Custom {
-                                pos: 0,
-                                err: Box::new(e),
-                            })?;
+                            .map_err(|e| Error::Err(Box::new(e)))?;
                         let value = hash_writer.hash();
                         let mut new_data = hash_writer.into_inner();
                         new_data.seek_start().await?;
                         (new_data, value)
                     } else {
-                        return Err(Error::AssertFail {
-                            pos: 0,
-                            message: "compressed data is none".to_string(),
-                        });
+                        return Err(Error::AssertFail("compressed data is none".to_string()));
                     }
                 };
                 self.sha_value = Some(sha);
@@ -775,10 +753,7 @@ where
                 data.set_position(pos).await?;
                 Ok(bytes)
             } else {
-                Err(Error::AssertFail {
-                    pos: 0,
-                    message: "directory data is none".to_string(),
-                })
+                Err(Error::AssertFail("directory data is none".to_string()))
             }
         }
     }
@@ -794,10 +769,7 @@ where
                 self.sha_value = Some(sha.clone());
                 Ok(sha)
             } else {
-                Err(Error::AssertFail {
-                    pos: 0,
-                    message: "directory data is none".to_string(),
-                })
+                Err(Error::AssertFail("directory data is none".to_string()))
             }
         }
     }
@@ -835,10 +807,7 @@ where
                                 callback,
                             )
                             .await
-                            .map_err(|e| Error::Custom {
-                                pos: 0,
-                                err: Box::new(e),
-                            })?;
+                            .map_err(|e| Error::Err(Box::new(e)))?;
                         }
                         self.crc_32_uncompressed_data = crc32_reader.crc32();
                         self.file.crc_32_uncompressed_data = self.crc_32_uncompressed_data;
@@ -892,10 +861,7 @@ where
                             callback,
                         )
                         .await
-                        .map_err(|e| Error::Custom {
-                            pos: 0,
-                            err: Box::new(e),
-                        })?;
+                        .map_err(|e| Error::Err(Box::new(e)))?;
                     }
                     let compress_size = writer.position().await? - pos;
                     Some((crc32_reader.crc32(), compress_size as u32))

@@ -167,10 +167,10 @@ impl BinRead for Extra {
                     }
                     if flags & 0xF8 != 0 {
                         let pos = reader.position().await?;
-                        return Err(Error::BadMagic {
+                        return Err(Error::BadMagic(
                             pos,
-                            found: Box::new("Flags is invalid in ExtendedTimestamp"),
-                        });
+                            "Flags is invalid in ExtendedTimestamp".to_string(),
+                        ));
                     }
                     Self::UnixExtendedTimestamp {
                         mtime,
@@ -197,19 +197,19 @@ impl BinRead for Extra {
                     _length -= 2;
                     if tag != 0x0001 {
                         let pos = reader.position().await?;
-                        return Err(Error::BadMagic {
+                        return Err(Error::BadMagic(
                             pos,
-                            found: Box::new("Tag is invalid in NtfsTimestamp"),
-                        });
+                            "Tag is invalid in NtfsTimestamp".to_string(),
+                        ));
                     }
                     let size: u16 = reader.read_type(endian).await?;
                     _length -= 2;
                     if size != 24 {
                         let pos = reader.position().await?;
-                        return Err(Error::BadMagic {
+                        return Err(Error::BadMagic(
                             pos,
-                            found: Box::new("Invalid NTFS Timestamps size"),
-                        });
+                            "Invalid NTFS Timestamps size".to_string(),
+                        ));
                     }
                     let mtime: u64 = if _length > 0 {
                         _length -= 8;
@@ -237,10 +237,10 @@ impl BinRead for Extra {
                 }
                 _ => {
                     let pos = reader.position().await?;
-                    return Err(Error::BadMagic {
+                    return Err(Error::BadMagic(
                         pos,
-                        found: Box::new(format!("Extra id {} not match", id)),
-                    });
+                        format!("Extra id {} not match", id),
+                    ));
                 }
             })
         }

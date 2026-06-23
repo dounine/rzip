@@ -8,7 +8,7 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Er
 use core::fmt::Display;
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
-use std::fs::{OpenOptions};
+use std::fs::OpenOptions;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
@@ -92,10 +92,10 @@ impl BinRead for ZipModel {
                 0x02 => Self::Bin,
                 _ => {
                     let pos = reader.position().await?;
-                    return Err(Error::BadMagic {
+                    return Err(Error::BadMagic(
                         pos,
-                        found: Box::new(format!("magic {} not match for ZipModel", value)),
-                    });
+                        format!("magic {} not match for ZipModel", value),
+                    ));
                 }
             };
             Ok(model)
@@ -130,10 +130,7 @@ impl BinRead for Magic {
                 0x04034b50 => Self::File,
                 _ => {
                     let pos = reader.position().await?;
-                    return Err(Error::BadMagic {
-                        pos,
-                        found: Box::new(format!("magic {} not match", value)),
-                    });
+                    return Err(Error::BadMagic(pos, format!("magic {} not match", value)));
                 }
             };
             Ok(value)
@@ -391,11 +388,8 @@ where
                 let dir: Directory<T> =
                     Directory::read_options(reader, endian, (index, model, config, read_bytes))
                         .await?;
-                let name =
-                    String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Custom {
-                        pos: 0,
-                        err: Box::new(e),
-                    })?;
+                let name = String::from_utf8(dir.file_name.inner.clone())
+                    .map_err(|e| Error::Err(Box::new(e)))?;
                 directories.insert(name, dir);
             }
             Ok(IndexDirectory(directories))
@@ -611,10 +605,7 @@ where
                 .await;
 
                 for res in results {
-                    res.map_err(|e| binrw::Error::Custom {
-                        pos: 0,
-                        err: Box::new(e),
-                    })??;
+                    res.map_err(|e| binrw::Error::Err(Box::new(e)))??;
                 }
             }
             #[cfg(not(feature = "parallel"))]
@@ -671,10 +662,8 @@ where
         if dir.file_name.inner != dir.file.file_name.inner {
             dir.file.file_name = dir.file_name.clone();
         }
-        let name = String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Custom {
-            pos: 0,
-            err: Box::new(e),
-        })?;
+        let name =
+            String::from_utf8(dir.file_name.inner.clone()).map_err(|e| Error::Err(Box::new(e)))?;
         self.directories.insert(name, dir);
         Ok(())
     }
@@ -929,10 +918,7 @@ where
                 }
                 .await;
                 for res in results {
-                    res.map_err(|e| binrw::Error::Custom {
-                        pos: 0,
-                        err: Box::new(e),
-                    })??;
+                    res.map_err(|e| binrw::Error::Err(Box::new(e)))??;
                 }
             }
 
@@ -1003,10 +989,7 @@ where
         .await;
 
         for res in results {
-            res.map_err(|e| binrw::Error::Custom {
-                pos: 0,
-                err: Box::new(e),
-            })??;
+            res.map_err(|e| binrw::Error::Err(Box::new(e)))??;
         }
 
         Ok(())
@@ -1077,14 +1060,8 @@ where
         }
         .await;
         for res in results {
-            res.map_err(|e| binrw::Error::Custom {
-                pos: 0,
-                err: Box::new(e),
-            })?
-            .map_err(|ee| binrw::Error::Custom {
-                pos: 0,
-                err: Box::new(ee),
-            })?;
+            res.map_err(|e| binrw::Error::Err(Box::new(e)))?
+                .map_err(|ee| binrw::Error::Err(Box::new(ee)))?;
         }
         self.package(writer, compression_level).await
     }
@@ -1291,10 +1268,10 @@ pub fn parse_eocd_offset<R: Read + Seek + Send>(
         let pos = reader.position().await?;
 
         if file_size < search_size {
-            return Err(Error::BadMagic {
+            return Err(Error::BadMagic(
                 pos,
-                found: Box::new("file size le search size, not a zip file"),
-            });
+                "file size le search size, not a zip file".to_string(),
+            ));
         }
         // let eocd_magic: u32 = Magic::EoCd.into();
         loop {
@@ -1323,10 +1300,7 @@ pub fn parse_eocd_offset<R: Read + Seek + Send>(
             }
             search_size = (search_size * 2).min(file_size);
         }
-        Err(Error::BadMagic {
-            pos,
-            found: Box::new("not a zip file"),
-        })
+        Err(Error::BadMagic(pos, "not a zip file".to_string()))
     }
 }
 

@@ -291,10 +291,10 @@ pub fn data_position_parse<R: Read + Seek + Send>(
         if *model == ZipModel::Bin {
             return reader.read_type(endian).await;
         }
-        reader.position().await.map_err(|e| binrw::Error::Custom {
-            pos: 0,
-            err: Box::new(e),
-        })
+        reader
+            .position()
+            .await
+            .map_err(|e| binrw::Error::Err(Box::new(e)))
     }
 }
 #[derive(Clone)]
