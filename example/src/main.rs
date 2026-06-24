@@ -8,12 +8,15 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+use tempfile::{tempdir, tempdir_in};
 
 pub enum MyData {
     File {
+        path: PathBuf,
         inner: File,
         config: MyStreamConfig,
     },
@@ -158,18 +161,21 @@ impl StreamDefault for MyData {
             config.source = None;
             if let (Some(size), Some(limit_size)) = (config.compress_size, config.limit_size) {
                 if size > limit_size {
-                    let tempfile = tempfile::tempfile()?;
+                    let temp_path = tempdir()?.path().join("f");
+                    // let tempfile = tempfile::tempfile()?;
                     return Ok(Self::File {
-                        inner: tempfile.into(),
+                        path: temp_path.clone(),
+                        inner: std::fs::File::open(&temp_path)?,
                         config,
                     });
                 }
             }
             if let (Some(size), Some(limit_size)) = (config.un_compress_size, config.limit_size) {
                 if size > limit_size {
-                    let tempfile = tempfile::tempfile()?;
+                    let temp_path = tempdir()?.path().join("f");
                     return Ok(Self::File {
-                        inner: tempfile.into(),
+                        path: temp_path.clone(),
+                        inner: std::fs::File::open(&temp_path)?,
                         config,
                     });
                 }
@@ -292,9 +298,8 @@ impl Write for MyData {
 }
 impl Seek for MyData {
     async fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        use std::io::Seek;
         match self {
-            MyData::File { inner, .. } => inner.seek(pos),
+            MyData::File { inner, .. } => inner.seek(pos).await,
             MyData::Mem { inner, .. } => std::io::Seek::seek(inner, pos),
             MyData::Shared {
                 offset: _,
@@ -341,38 +346,57 @@ impl Seek for MyData {
 }
 #[tokio::main]
 async fn main() {
-    let data = fs::File::open("./data/hello.zip".to_string()).unwrap();
+    // let data = fs::File::open("./data/hello.zip".to_string()).unwrap();
     // let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
     // let data = File::open("./data/SideStore.ipa").unwrap();
-    let source = Arc::new(data);
+    // let source = Arc::new(data);
     // let file_len =source.len() as u64;
-    let file_len = source.metadata().unwrap().len();
+    // let file_len = source.metadata().unwrap().len();
 
     let mut config = MyStreamConfig::default();
-    config.source = Some(source.clone());
+    // config.source = Some(source.clone());
 
     // We start with a Shared view of the entire file
-    let mut data: MyData = MyData::Shared {
-        inner: source.clone(),
-        offset: 0,
-        pos: 0,
-        size: file_len,
+    // let mut data: MyData = MyData::Shared {
+    //     inner: source.clone(),
+    //     offset: 0,
+    //     pos: 0,
+    //     size: file_len,
+    //     config: config.clone(),
+    // };
+    let file_path = PathBuf::from_str("/Users/lake/dounine/github/ipa/rzip/data/mini.ipa").unwrap();
+    let mut data = MyData::File {
+        path: file_path.clone(),
+        inner: File::open(file_path).unwrap(),
         config: config.clone(),
     };
     // data.read_exact()
     // let mut cursor = Cursor::new(data);
     // let dd = cursor.get_mut();
     let time = Instant::now();
-
-    config.limit_size = Some(1024 * 100);
+    // config.limit_size = Some(1024 * 100);
     let mut zip_file: FastZip<MyData> = FastZip::parse_with_callback(&mut data, |total, sum| {
         Box::pin(async move {
             let format = format!("{:.2}%", (sum as f64 / total as f64) * 100.0);
+            Ok(())
             // println!("process {}", format);
         })
     })
     .await
     .unwrap();
+    zip_file
+        .unzip(
+            &PathBuf::from_str("./data").unwrap(),
+            &mut |total, bytes| Box::pin(async move {
+                Ok(())
+            }),
+        )
+        .await
+        .unwrap();
+    println!("time {:?}", time.elapsed());
+    if true {
+        return;
+    }
     // for (key,dir) in &mut zip_file.directories.0{
     //     dir.decompressed().await.unwrap();
     // }
@@ -460,6 +484,7 @@ async fn main() {
             &mut |total, bytes| {
                 Box::pin(async move {
                     // println!("{:.2}%", (bytes as f64 / total as f64) * 100.0)
+                    Ok(())
                 })
             },
         )

@@ -1,6 +1,6 @@
 use crate::directory::{CompressionMethod, Directory, Name};
 use crate::file::{DataDescriptor, ExtraList, ZipFile};
-use binrw::io::ReadBytesCallback;
+use binrw::io::{BufReader, BufWriter, ReadBytesCallback};
 use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
@@ -229,6 +229,7 @@ where
         Self: Sync + 'a,
     {
         async move {
+            // let mut writer = BufWriter::new(writer);
             let model = args;
             writer.write_le(&0x04034b50_u32).await?;
             if *model == ZipModel::Bin {
@@ -252,6 +253,7 @@ where
             if *model == ZipModel::Bin {
                 writer.write_le_args(&self.directories, (model,)).await?;
             }
+            // writer.flush().await?;
             Ok(())
         }
     }
@@ -278,6 +280,7 @@ where
         Self: 'a,
     {
         async move {
+            // let mut reader = BufReader::new(reader);
             let (model, config, read_bytes) = args;
             let pos = reader.position().await?;
             let magic: u32 = reader.read_le().await?;
@@ -309,10 +312,11 @@ where
             if *model == ZipModel::Parse {
                 reader.set_position(offset as u64).await?; // .seek(SeekFrom::Start(offset as u64)).await?;
             }
-            read_bytes(reader.position().await? - pos).await;
+            read_bytes(reader.position().await? - pos).await?;
             let directories: IndexDirectory<T> = reader
                 .read_le_args((model, config, entries, read_bytes))
                 .await?;
+            // reader.rewind_position().await?;
             Ok(Self {
                 config: config.clone(),
                 crc32_computer,
@@ -465,14 +469,16 @@ where
             let config = reader.config().clone();
             FastZip::read_le_args(
                 reader,
-                (&ZipModel::Parse, &config, &mut |_bytes| Box::pin(async {})),
+                (&ZipModel::Parse, &config, &mut |_bytes| {
+                    Box::pin(async { Ok(()) })
+                }),
             )
             .await
         }
     }
     pub fn parse_with_callback(
         reader: &mut T,
-        callback: impl FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+        callback: impl FnMut(u64, u64) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> + Send,
     ) -> impl Future<Output = BinResult<FastZip<T>>> + Send {
         async move {
             let config = reader.config().clone();
@@ -484,7 +490,7 @@ where
             let mut callback = Self::create_adapter(total, &mut buffered, &mut sum, callback);
             let result =
                 FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut callback)).await;
-            callback(0).await;
+            callback(0).await?;
             result
         }
     }
@@ -501,7 +507,7 @@ where
         callback: &'a mut F,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
     {
         async move {
             if !output.exists() {
@@ -531,7 +537,7 @@ where
                             let mut processed = 0;
                             while let Some(bytes) = rx.recv().await {
                                 processed += bytes;
-                                callback(total_bytes, processed).await;
+                                callback(total_bytes, processed).await?;
                             }
                             Ok(())
                         });
@@ -550,8 +556,11 @@ where
                                         let tx = tx.clone();
                                         Box::pin(async move {
                                             let _ = tx.send(bytes).await;
+                                            Ok(())
                                         })
-                                            as Pin<Box<dyn Future<Output = ()> + Send>>
+                                            as Pin<
+                                                Box<dyn Future<Output = Result<(), Error>> + Send>,
+                                            >
                                     };
                                     // dir.decompressed_callback(
                                     //     // &mut file,
@@ -779,14 +788,14 @@ where
         buffered: &'a mut u64,
         sum: &'a mut u64,
         mut cb: CB,
-    ) -> impl FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a
+    ) -> impl FnMut(u64) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> + Send + 'a
     where
-        CB: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + 'a,
+        CB: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> + Send + 'a,
     {
         move |bytes| {
             if bytes == 0 {
                 if *buffered == 0 {
-                    return Box::pin(async {});
+                    return Box::pin(async { Ok(()) });
                 }
                 let result = cb(total, *sum);
                 *buffered = 0;
@@ -798,7 +807,7 @@ where
                 *buffered = 0;
                 cb(total, *sum)
             } else {
-                Box::pin(async {})
+                Box::pin(async { Ok(()) })
             }
         }
     }
@@ -821,29 +830,6 @@ where
             Ok(total_size)
         }
     }
-    pub fn to_bin<W: Write + Seek + Send>(
-        &self,
-        writer: &mut W,
-    ) -> impl Future<Output = BinResult<()>> + Send {
-        async move {
-            self.write_le_args(writer, &ZipModel::Bin).await?;
-            Ok(())
-        }
-    }
-    pub fn from_bin<R: Read + Seek + Send>(
-        reader: &mut R,
-    ) -> impl Future<Output = BinResult<Self>> + Send {
-        async move {
-            reader.seek_start().await?;
-            FastZip::read_le_args(
-                reader,
-                (&ZipModel::Bin, &T::Config::default(), &mut |_bytes| {
-                    Box::pin(async {})
-                }),
-            )
-            .await
-        }
-    }
     pub fn package(
         &mut self,
         writer: &mut T,
@@ -851,17 +837,17 @@ where
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             self.package_with_stream_callback(writer, compression_level, &mut |_total, _size| {
-                Box::pin(async {})
+                Box::pin(async { Ok(()) })
             })
             .await
         }
     }
-    pub fn decompress_all_files<F>(
+    pub fn decompress_all_files<'a, F>(
         &mut self,
-        callback: &mut F,
+        callback: &'a mut F,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> + Send,
     {
         async move {
             let mut sum = 0;
@@ -891,7 +877,7 @@ where
                     async_scoped::TokioScope::scope_and_collect(|scope| {
                         scope.spawn(async {
                             while let Some(bytes) = rx.recv().await {
-                                callback(bytes).await;
+                                callback(bytes).await?;
                             }
                             Ok(())
                         });
@@ -907,8 +893,9 @@ where
                                     let tx = tx.clone();
                                     Box::pin(async move {
                                         let _ = tx.send(bytes).await;
+                                        Ok(())
                                     })
-                                        as Pin<Box<dyn Future<Output = ()> + Send>>
+                                        as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
                                 };
                                 dir.decompressed_callback(&mut f).await
                             });
@@ -933,7 +920,7 @@ where
         files: &'a [String],
     ) -> BinResult<()>
     where
-        F: FnMut(u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+        F: FnMut(u64) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> + Send,
     {
         use std::collections::HashSet;
 
@@ -963,7 +950,7 @@ where
             async_scoped::TokioScope::scope_and_collect(|scope| {
                 scope.spawn(async {
                     while let Some(bytes) = rx.recv().await {
-                        callback(bytes).await;
+                        callback(bytes).await?;
                     }
                     Ok(())
                 });
@@ -977,8 +964,9 @@ where
                             let tx = tx.clone();
                             Box::pin(async move {
                                 let _ = tx.send(bytes).await;
+                                Ok(())
                             })
-                                as Pin<Box<dyn Future<Output = ()> + Send>>
+                                as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
                         };
                         dir.decompressed_callback(&mut f).await
                     });
@@ -1003,7 +991,7 @@ where
         callback: &'a mut F,
     ) -> BinResult<()>
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
     {
         use tokio::sync::mpsc;
         let total_un_compress_size = self.computer_un_compress_size().await?;
@@ -1022,7 +1010,7 @@ where
                     let mut processed = 0;
                     while let Some(bytes) = rx.recv().await {
                         processed += bytes;
-                        callback(total_un_compress_size, processed).await;
+                        callback(total_un_compress_size, processed).await?;
                     }
                     Ok(())
                 });
@@ -1048,8 +1036,9 @@ where
                             let tx = tx.clone();
                             Box::pin(async move {
                                 let _ = tx.send(bytes).await;
+                                Ok(())
                             })
-                                as Pin<Box<dyn Future<Output = ()> + Send>>
+                                as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
                         };
                         dir.compress_callback(cfg, crc32, compression_level, &mut f)
                             .await
@@ -1072,7 +1061,7 @@ where
         callback: &mut F,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
     {
         async move {
             let mut header = T::from_config(writer.config()).await?;
@@ -1124,7 +1113,7 @@ where
                 };
                 files_size += file_writer_length + file_data_length;
             }
-            callback(0).await;
+            callback(0).await?;
             header.seek_start().await?;
             binrw::io::copy(&mut header, writer).await?;
             self.size = directors_size as u32;
@@ -1143,7 +1132,7 @@ where
         callback: &mut F,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send,
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
     {
         async move {
             let mut files_size = 0;
@@ -1223,7 +1212,7 @@ where
                 let header_pos_after = writer.position().await?;
                 directors_size += header_pos_after - header_pos_before;
             }
-            callback(0).await;
+            callback(0).await?;
             self.size = directors_size as u32;
             self.entries = self.directories.len() as u16;
             self.number_of_directory_disk = self.directories.len() as u16;

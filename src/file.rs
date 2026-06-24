@@ -1,6 +1,7 @@
 use crate::directory::{CompressionMethod, Name};
 use crate::extra::Extra;
 use crate::zip::{ZipModel, is_dir};
+use binrw::io::{BufReader, BufWriter};
 use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
@@ -112,6 +113,7 @@ impl BinWrite for ZipFile {
         Self: Sync + 'a,
     {
         async move {
+            // let mut writer = BufWriter::new(writer);
             let (model, uncompressed_size) = args;
             writer.write_le(&0x04034b50_u32).await?;
             let extract_zip_spec: u8 = if is_dir(&self.file_name.inner) {
@@ -157,6 +159,7 @@ impl BinWrite for ZipFile {
             if *model == ZipModel::Bin {
                 writer.write_le(&self.data_position).await?;
             }
+            // writer.flush().await?;
             Ok(())
         }
     }
@@ -175,6 +178,7 @@ impl BinRead for ZipFile {
         Self: Send + 'a,
     {
         async move {
+            // let mut reader = BufReader::new(reader);
             let (model, uncompressed_size) = args;
             let magic: u32 = reader.read_le().await?;
             assert_eq!(magic, 0x04034b50_u32);
@@ -204,6 +208,7 @@ impl BinRead for ZipFile {
             // 把\替换成/
             let extra_fields: ExtraList = reader.read_le_args(extra_field_length).await?;
             let data_position: u64 = data_position_parse(reader, endian, model).await?;
+            // reader.rewind_position().await?;
             Ok(Self {
                 extract_zip_spec,
                 extract_os,

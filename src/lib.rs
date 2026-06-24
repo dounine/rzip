@@ -8,3 +8,6 @@ pub mod zip;
 pub mod hash;
 pub use miniz_oxide::deflate::CompressionLevel;
 pub use directory::Directory;
+
+pub use binrw::BinResult;
+pub use binrw::error::Error as BinError;
