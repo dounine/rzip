@@ -156,6 +156,7 @@ impl BinWrite for ZipFile {
             writer.write_le(&self.extra_fields).await?;
             if *model == ZipModel::Bin {
                 writer.write_le(&self.data_position).await?;
+                writer.write_le(&self.data_descriptor).await?;
             }
             Ok(())
         }
