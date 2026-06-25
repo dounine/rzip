@@ -5,7 +5,7 @@ use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
-use binrw::io::{ReadBytesCallback};
+use binrw::io::{BufWriter, ReadBytesCallback};
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
@@ -767,9 +767,12 @@ where
             if let Some(data) = &mut self.data {
                 let pos = data.position().await?;
                 data.seek_start().await?;
-                let mut hasher = HashWriterNull::new();
+                let hasher = HashWriterNull::new();
+                let mut hasher = BufWriter::with_capacity(24 * 1024, hasher);
                 binrw::io::copy(&mut *data, &mut hasher).await?;
                 data.set_position(pos).await?;
+                hasher.flush().await?;
+                let hasher = hasher.into_inner();
                 let sha = hasher.finalize();
                 self.sha_value = Some(sha.clone());
                 Ok(sha)
@@ -800,10 +803,15 @@ where
                         let mut config = config.clone();
                         config.compress_size_mut(self.compressed_size as u64);
                         let mut compress_data = T::from_config(&config).await?;
+                        // let mut compress_data =
+                            // BufWriter::with_capacity(3 * 32 * 1024, compress_data);
+
                         let mut crc32_reader = Crc32Reader::new(data);
                         if crc32_computer {
                             crc32_reader.init_crc32();
                         }
+                        // let mut crc32_reader =
+                            // BufReader::with_capacity(3 * 32 * 1024, crc32_reader);
                         if uncompressed_size > 0 {
                             miniz_oxide::deflate::stream::compress_stream_callback(
                                 &mut crc32_reader,
@@ -814,6 +822,10 @@ where
                             .await
                             .map_err(|e| Error::Err(Box::new(e)))?;
                         }
+                        // crc32_reader.rewind_position().await?;
+                        // let crc32_reader = crc32_reader.into_inner();
+                        // compress_data.flush().await?;
+                        // let mut compress_data = compress_data.into_inner();
                         self.crc_32_uncompressed_data = crc32_reader.crc32();
                         self.file.crc_32_uncompressed_data = self.crc_32_uncompressed_data;
                         self.compressed_size = compress_data.length().await? as u32;

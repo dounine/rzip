@@ -340,7 +340,7 @@ impl Seek for MyData {
 }
 #[tokio::main]
 async fn main() {
-    let data = fs::File::open("./data/hello.zip".to_string()).unwrap();
+    let data = fs::File::open("./data/hello2.zip".to_string()).unwrap();
     // let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
     // let data = File::open("./data/SideStore.ipa").unwrap();
     let source = Arc::new(data);
