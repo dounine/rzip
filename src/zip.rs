@@ -1,9 +1,9 @@
 use crate::directory::{CompressionMethod, Directory, Name};
 use crate::file::{DataDescriptor, ExtraList, ZipFile};
-use binrw::io::{BufReader, BufWriter, ReadBytesCallback};
 use binrw::io::read::Read;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
+use binrw::io::{BufReader, BufWriter, ReadBytesCallback};
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use core::fmt::Display;
 use indexmap::IndexMap;
@@ -229,7 +229,6 @@ where
         Self: Sync + 'a,
     {
         async move {
-            // let mut writer = BufWriter::new(writer);
             let model = args;
             writer.write_le(&0x04034b50_u32).await?;
             if *model == ZipModel::Bin {
@@ -253,7 +252,6 @@ where
             if *model == ZipModel::Bin {
                 writer.write_le_args(&self.directories, (model,)).await?;
             }
-            // writer.flush().await?;
             Ok(())
         }
     }
@@ -839,7 +837,8 @@ where
             self.package_with_stream_callback(writer, compression_level, &mut |_total, _size| {
                 Box::pin(async { Ok(()) })
             })
-            .await
+            .await?;
+            Ok(())
         }
     }
     pub fn decompress_all_files<'a, F>(
@@ -1052,7 +1051,8 @@ where
             res.map_err(|e| binrw::Error::Err(Box::new(e)))?
                 .map_err(|ee| binrw::Error::Err(Box::new(ee)))?;
         }
-        self.package(writer, compression_level).await
+        self.package(writer, compression_level).await?;
+        Ok(())
     }
     pub fn package_with_callback<F>(
         &mut self,

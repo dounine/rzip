@@ -5,7 +5,7 @@ use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
-use binrw::io::{BufWriter, ReadBytesCallback};
+use binrw::io::{BufReader, BufWriter, ReadBytesCallback};
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
@@ -498,7 +498,6 @@ where
                     value.set_position(pos).await?;
                 }
             }
-            // writer.flush().await?;
             Ok(())
         }
     }
@@ -666,13 +665,13 @@ where
     pub fn compressed(&self) -> bool {
         self.compressed
     }
-    pub fn decompressed_with_writer_callback<'a, TT>(
+    pub fn decompressed_with_writer_callback<'a, W>(
         &mut self,
-        writer: &'a mut TT,
+        writer: &'a mut W,
         callback_fun: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        TT: binrw::io::Write + binrw::io::Seek + Send,
+        W: Write + Seek + Send,
     {
         async move {
             if self.compressed() {
@@ -684,11 +683,7 @@ where
                     config.compress_size_mut(length);
                     // let new_data = T::from_config(&config).await?;
                     // let mut hash_writer = HashWriter::new(new_data);
-                    decompress_stream_callback(&mut *data, writer, &mut |a|{
-                        Box::pin(async move{
-
-                        })
-                    })
+                    decompress_stream_callback(&mut *data, writer, callback_fun)
                         .await
                         .map_err(|e| Error::Err(Box::new(e)))?;
                     // let value = hash_writer.hash();
@@ -725,11 +720,7 @@ where
                         config.compress_size_mut(length);
                         let new_data = T::from_config(&config).await?;
                         let mut hash_writer = HashWriter::new(new_data);
-                        decompress_stream_callback(&mut *data, &mut hash_writer, &mut |a|{
-                                                Box::pin(async move{
-
-                                                })
-                                            })
+                        decompress_stream_callback(&mut *data, &mut hash_writer, callback_fun)
                             .await
                             .map_err(|e| Error::Err(Box::new(e)))?;
                         let value = hash_writer.hash();
@@ -818,11 +809,7 @@ where
                                 &mut crc32_reader,
                                 &mut compress_data,
                                 compression_level,
-                                &mut |a|{
-                                                        Box::pin(async move{
-
-                                                        })
-                                                    },
+                                callback,
                             )
                             .await
                             .map_err(|e| Error::Err(Box::new(e)))?;
@@ -845,14 +832,17 @@ where
             Ok(())
         }
     }
-    pub fn compress_to_writer_callback<'a>(
+    pub fn compress_to_writer_callback<'a, W>(
         &'a mut self,
         config: &'a T::Config,
         crc32_computer: bool,
         compression_level: CompressionLevel,
-        writer: &'a mut T,
+        writer: &'a mut W,
         callback: &'a mut ReadBytesCallback<'a>,
-    ) -> impl Future<Output = BinResult<Option<(u32, u32)>>> + Send {
+    ) -> impl Future<Output = BinResult<Option<(u32, u32)>>> + Send
+    where
+        W: Write + Seek + Send,
+    {
         async move {
             if !self.compressed && self.compression_method == CompressionMethod::Deflate {
                 let mut config = config.clone();
@@ -876,11 +866,7 @@ where
                             &mut crc32_reader,
                             writer,
                             compression_level,
-                            &mut |a|{
-                                                    Box::pin(async move{
-
-                                                    })
-                                                },
+                            callback,
                         )
                         .await
                         .map_err(|e| Error::Err(Box::new(e)))?;
