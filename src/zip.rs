@@ -278,7 +278,6 @@ where
         Self: 'a,
     {
         async move {
-            // let mut reader = BufReader::new(reader);
             let (model, config, read_bytes) = args;
             let pos = reader.position().await?;
             let magic: u32 = reader.read_le().await?;
@@ -314,7 +313,6 @@ where
             let directories: IndexDirectory<T> = reader
                 .read_le_args((model, config, entries, read_bytes))
                 .await?;
-            // reader.rewind_position().await?;
             Ok(Self {
                 config: config.clone(),
                 crc32_computer,
@@ -465,13 +463,16 @@ where
     pub fn parse(reader: &mut T) -> impl Future<Output = BinResult<FastZip<T>>> + Send {
         async move {
             let config = reader.config().clone();
-            FastZip::read_le_args(
-                reader,
+            let mut reader = BufReader::with_capacity(32 * 1024, reader);
+            let zip = FastZip::read_le_args(
+                &mut reader,
                 (&ZipModel::Parse, &config, &mut |_bytes| {
                     Box::pin(async { Ok(()) })
                 }),
             )
-            .await
+            .await?;
+            reader.rewind_position().await?;
+            Ok(zip)
         }
     }
     pub fn parse_with_callback(
@@ -486,8 +487,11 @@ where
             let mut sum = 0;
             let mut buffered = 0;
             let mut callback = Self::create_adapter(total, &mut buffered, &mut sum, callback);
+            let mut reader = BufReader::with_capacity(32 * 1024, reader);
             let result =
-                FastZip::read_le_args(reader, (&ZipModel::Parse, &config, &mut callback)).await;
+                FastZip::read_le_args(&mut reader, (&ZipModel::Parse, &config, &mut callback))
+                    .await;
+            reader.rewind_position().await?;
             callback(0).await?;
             result
         }
@@ -567,12 +571,14 @@ where
                                     // .await?;
                                     if let Some(_data) = &mut dir.data {
                                         // 确保文件的父目录存在
+
+                                        use binrw::io::BufWriter;
                                         if let Some(parent_dir) = file_path.parent() {
                                             if !parent_dir.exists() {
                                                 tokio::fs::create_dir_all(parent_dir).await?;
                                             }
                                         }
-                                        let mut file = OpenOptions::new()
+                                        let file = OpenOptions::new()
                                             .read(true)
                                             .write(true)
                                             .create(true)
@@ -595,12 +601,13 @@ where
                                         // }
                                         // mmap.flush()?;
                                         // binrw::io::copy(reader, writer)
-
+                                        let mut file = BufWriter::with_capacity(1024 * 1024, file);
                                         dir.decompressed_with_writer_callback(
                                             &mut file,
                                             &mut callback,
                                         )
                                         .await?;
+                                        file.flush().await?;
                                     }
                                     Ok(())
                                 }
@@ -635,11 +642,12 @@ where
                                     std::fs::create_dir_all(parent_dir)?;
                                 }
                             }
-                            let mut file = OpenOptions::new()
+                            let file = OpenOptions::new()
                                 .write(true)
                                 .create(true)
                                 .truncate(true)
                                 .open(file_path)?;
+                            let mut file = BufWriter::with_capacity(1024 * 1024, file);
                             binrw::io::copy(data, &mut file).await?;
                         }
                     }
@@ -1148,6 +1156,7 @@ where
             );
             let crc32_computer = self.crc32_computer;
             let config = writer.config().clone();
+            let mut writer = BufWriter::with_capacity(32 * 1024, writer);
             //write LOCAL HEADER
             for (_, director) in &mut self.directories.0 {
                 director.offset_of_local_file_header = files_size as u32;
@@ -1171,7 +1180,7 @@ where
                             &config,
                             crc32_computer,
                             compression_level,
-                            writer,
+                            &mut writer,
                             &mut callback,
                         )
                         .await?
@@ -1183,7 +1192,7 @@ where
                         });
                     } else if let Some(data) = &mut director.data {
                         data.seek_start().await?;
-                        binrw::io::copy(data, writer).await?;
+                        binrw::io::copy(data, &mut writer).await?;
                         if director.compression_method == CompressionMethod::Deflate {
                             director.file.data_descriptor = Some(DataDescriptor {
                                 crc32: director.file.crc_32_uncompressed_data,
@@ -1217,7 +1226,8 @@ where
             self.entries = self.directories.len() as u16;
             self.number_of_directory_disk = self.directories.len() as u16;
             self.offset = files_size as u32;
-            self.write_eocd(writer).await?;
+            self.write_eocd(&mut writer).await?;
+            writer.flush().await?;
             writer.seek_start().await?;
             Ok(())
         }

@@ -5,7 +5,7 @@ use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
-use binrw::io::{BufReader, BufWriter, ReadBytesCallback};
+use binrw::io::{ReadBytesCallback};
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use miniz_oxide::deflate::CompressionLevel;
 use miniz_oxide::inflate::stream::decompress_stream_callback;
