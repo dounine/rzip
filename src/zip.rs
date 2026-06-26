@@ -8,6 +8,7 @@ use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Er
 use core::fmt::Display;
 use indexmap::IndexMap;
 use miniz_oxide::deflate::CompressionLevel;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
@@ -383,6 +384,7 @@ where
     {
         async move {
             let (model, config, count, read_bytes) = args;
+            let mut seen = HashSet::new();
             let mut directories = IndexMap::with_capacity(count as usize);
             for index in 0..count {
                 let dir: Directory<T> =
@@ -390,7 +392,10 @@ where
                         .await?;
                 let name = String::from_utf8(dir.file_name.inner.clone())
                     .map_err(|e| Error::Err(Box::new(e)))?;
-                directories.insert(name, dir);
+                let lower = name.to_lowercase();
+                if seen.insert(lower) {
+                    directories.insert(name, dir);
+                }
             }
             Ok(IndexDirectory(directories))
         }
@@ -785,6 +790,14 @@ where
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             let dir = Self::create_dir(data, file_name).await?;
+            let lower = file_name.to_lowercase();
+            let mut seen = IndexMap::new();
+            for (name, _) in &self.directories.0 {
+                seen.insert(name.to_lowercase(), name.to_string());
+            }
+            if let Some(full_name) = seen.get(&lower) {
+                self.directories.swap_remove(full_name);
+            }
             self.directories.insert(file_name.to_string(), dir);
             Ok(())
         }
@@ -1185,6 +1198,8 @@ where
                         )
                         .await?
                     {
+                        director.compressed_size = compressed_size as u32;
+                        director.crc_32_uncompressed_data = crc32;
                         director.file.data_descriptor = Some(DataDescriptor {
                             crc32,
                             compressed_size,
@@ -1229,6 +1244,106 @@ where
             self.write_eocd(&mut writer).await?;
             writer.flush().await?;
             writer.seek_start().await?;
+            Ok(())
+        }
+    }
+    pub fn package_with_tokio_callback<F>(
+        &mut self,
+        writer: &mut T,
+        compression_level: CompressionLevel,
+        callback: &mut F,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
+    {
+        async move {
+            let mut files_size = 0;
+            let mut directors_size = 0;
+            let mut binding = 0;
+            let total_un_compress_size = self.computer_un_compress_size().await?;
+            let mut buffered = 0;
+            let mut callback = Self::create_adapter(
+                total_un_compress_size,
+                &mut buffered,
+                &mut binding,
+                callback,
+            );
+            let crc32_computer = self.crc32_computer;
+            let config = writer.config().clone();
+            let mut writer = BufWriter::with_capacity(32 * 1024, writer);
+            //write LOCAL HEADER
+            for (_, director) in &mut self.directories.0 {
+                director.offset_of_local_file_header = files_size as u32;
+
+                let writer_pos_before = writer.position().await?;
+                let is_dir = director.is_dir();
+                {
+                    let file = &mut director.file;
+                    if !is_dir && director.compression_method == CompressionMethod::Deflate {
+                        director.flags = 0x08;
+                        file.flags = 0x08;
+                    }
+                    writer
+                        .write_le_args(file, (&ZipModel::Parse, director.uncompressed_size))
+                        .await?;
+                }
+
+                if !is_dir {
+                    if let Some((crc32, compressed_size)) = director
+                        .compress_to_writer_callback(
+                            &config,
+                            crc32_computer,
+                            compression_level,
+                            &mut writer,
+                            &mut callback,
+                        )
+                        .await?
+                    {
+                        director.compressed_size = compressed_size as u32;
+                        director.crc_32_uncompressed_data = crc32;
+                        director.file.data_descriptor = Some(DataDescriptor {
+                            crc32,
+                            compressed_size,
+                            uncompressed_size: director.uncompressed_size,
+                        });
+                    } else if let Some(data) = &mut director.data {
+                        data.seek_start().await?;
+                        binrw::io::copy(data, &mut writer).await?;
+                        if director.compression_method == CompressionMethod::Deflate {
+                            director.file.data_descriptor = Some(DataDescriptor {
+                                crc32: director.file.crc_32_uncompressed_data,
+                                compressed_size: director.file.compressed_size,
+                                uncompressed_size: director.file.uncompressed_size,
+                            });
+                            director.file.crc_32_uncompressed_data = 0;
+                            director.file.compressed_size = 0;
+                        }
+                    }
+                }
+                if let Some(data_descriptor) = &mut director.file.data_descriptor {
+                    writer.write_le(data_descriptor).await?;
+                }
+                let file_writer_length = writer.position().await? - writer_pos_before; //写入LOCAL HEADER长度
+                files_size += file_writer_length;
+            }
+
+            // write CENTRAL HEADER
+            for (_, director) in &mut self.directories.0 {
+                let header_pos_before = writer.position().await?;
+                if director.file.data_descriptor.is_some() {
+                    director.flags = 0x08;
+                }
+                writer.write_le_args(director, (&ZipModel::Parse,)).await?;
+                let header_pos_after = writer.position().await?;
+                directors_size += header_pos_after - header_pos_before;
+            }
+            callback(0).await?;
+            self.size = directors_size as u32;
+            self.entries = self.directories.len() as u16;
+            self.number_of_directory_disk = self.directories.len() as u16;
+            self.offset = files_size as u32;
+            self.write_eocd(&mut writer).await?;
+            writer.flush().await?;
             Ok(())
         }
     }

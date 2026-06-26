@@ -804,14 +804,14 @@ where
                         config.compress_size_mut(self.compressed_size as u64);
                         let mut compress_data = T::from_config(&config).await?;
                         // let mut compress_data =
-                            // BufWriter::with_capacity(3 * 32 * 1024, compress_data);
+                        // BufWriter::with_capacity(3 * 32 * 1024, compress_data);
 
                         let mut crc32_reader = Crc32Reader::new(data);
                         if crc32_computer {
                             crc32_reader.init_crc32();
                         }
                         // let mut crc32_reader =
-                            // BufReader::with_capacity(3 * 32 * 1024, crc32_reader);
+                        // BufReader::with_capacity(3 * 32 * 1024, crc32_reader);
                         if uncompressed_size > 0 {
                             miniz_oxide::deflate::stream::compress_stream_callback(
                                 &mut crc32_reader,
