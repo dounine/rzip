@@ -66,25 +66,12 @@ where
                                         .map_err(|e| Error::Io(e))
                                 } else {
                                     let _permit = semaphore.acquire().await.ok();
-                                    let mut callback = |bytes: u64| {
-                                        use binrw::Error;
-                                        use std::pin::Pin;
-
-                                        let tx = tx.clone();
-                                        Box::pin(async move {
-                                            let _ = tx.send(bytes).await;
-                                            Ok(())
-                                        })
-                                            as Pin<
-                                                Box<dyn Future<Output = Result<(), Error>> + Send>,
-                                            >
-                                    };
                                     if let Some(_data) = &mut dir.data {
                                         // 确保文件的父目录存在
 
                                         use std::fs::OpenOptions;
 
-                                        use binrw::io::BufWriter;
+                                        use binrw::io::{BufWriter, cb::WriteCallback};
                                         if let Some(parent_dir) = file_path.parent() {
                                             if !parent_dir.exists() {
                                                 tokio::fs::create_dir_all(parent_dir).await?;
@@ -96,6 +83,23 @@ where
                                             .create(true)
                                             .truncate(true)
                                             .open(file_path)?;
+                                        let callback = |bytes: u64| {
+                                            use binrw::Error;
+                                            use std::pin::Pin;
+
+                                            let tx = tx.clone();
+                                            Box::pin(async move {
+                                                let _ = tx.send(bytes).await;
+                                                Ok(())
+                                            })
+                                                as Pin<
+                                                    Box<
+                                                        dyn Future<Output = Result<(), Error>>
+                                                            + Send,
+                                                    >,
+                                                >
+                                        };
+
                                         // file.set_len(data.length().await?)?;
                                         // let mut mmap = unsafe {
                                         //     use memmap2::MmapMut;
@@ -113,13 +117,10 @@ where
                                         // }
                                         // mmap.flush()?;
                                         // binrw::io::copy(reader, writer)
-                                        let mut file = BufWriter::with_capacity(1024 * 1024, file);
-                                        dir.decompressed_with_writer_callback(
-                                            &mut file,
-                                            &mut callback,
-                                        )
-                                        .await?;
-                                        file.flush().await?;
+                                        let file = BufWriter::with_capacity(1024 * 1024, file);
+                                        let mut output = WriteCallback::new(file, callback);
+                                        dir.decompressed_with_writer(&mut output).await?;
+                                        output.flush().await?;
                                     }
                                     Ok(())
                                 }
@@ -163,10 +164,10 @@ where
                                 .create(true)
                                 .truncate(true)
                                 .open(file_path)?;
-                            let mut file = BufWriter::with_capacity(1024 * 1024, file);
-                            dir.decompressed_with_writer_callback(&mut file, &mut callback)
-                                .await?;
-                            file.flush().await?;
+                            let file = BufWriter::with_capacity(1024 * 1024, file);
+                            let mut output = WriteCallback::new(file, callback);
+                            dir.decompressed_with_writer(&mut output).await?;
+                            output.flush().await?;
                         }
                     }
                 }
@@ -194,7 +195,7 @@ where
             #[cfg(not(feature = "parallel"))]
             {
                 for (_, dir) in &mut self.directories.0 {
-                    dir.decompressed_callback(&mut callback).await?;
+                    dir.decompressed_with_callback(&mut callback).await?;
                 }
             }
             #[cfg(feature = "parallel")]
@@ -230,7 +231,7 @@ where
                                     })
                                         as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
                                 };
-                                dir.decompressed_callback(&mut f).await
+                                dir.decompressed_with_callback(&mut f).await
                             });
                         }
                         drop(tx);
@@ -309,19 +310,22 @@ where
                 });
 
                 for dir in to_decompress {
-                    let tx = tx.clone();
                     let semaphore = semaphore.clone();
+                    let tx = tx.clone();
                     scope.spawn(async move {
                         let _permit = semaphore.acquire().await.ok();
-                        let mut f = |bytes: u64| {
+                        let mut callback = |bytes: u64| {
+                            use binrw::Error;
+                            use std::pin::Pin;
+
                             let tx = tx.clone();
                             Box::pin(async move {
                                 let _ = tx.send(bytes).await;
                                 Ok(())
                             })
-                                as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
+                                as Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>
                         };
-                        dir.decompressed_callback(&mut f).await
+                        dir.decompressed_with_callback(&mut callback).await
                     });
                 }
                 drop(tx);

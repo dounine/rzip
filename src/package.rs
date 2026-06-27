@@ -79,7 +79,6 @@ enum FileTask {
     CompressData { file_index: usize, buf: Vec<u8> },
     CompressFlush { file_index: usize },
     CompressDone { file_index: usize },
-    Progress { bytes: u64 },
 }
 
 impl<T> FastZip<T>
@@ -235,12 +234,12 @@ where
         }
     }
     // #[cfg(feature = "parallel")]
-    // pub async fn package_with_callback_parallel<'a, 'c: 'a, F>(
-    //     &'a mut self,
-    //     writer: &'c mut T,
+    // pub async fn package_with_callback_parallel2<F>(
+    //     &mut self,
+    //     writer: &mut T,
     //     compression_level: CompressionLevel,
     //     large_file_speed: u32,
-    //     callback: &'a mut F,
+    //     callback: &mut F,
     // ) -> BinResult<()>
     // where
     //     F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
@@ -284,16 +283,15 @@ where
     //                 i += 1;
     //                 scope.spawn(async move {
     //                     let _permit = semaphore.acquire().await.ok();
-    //                     let mut f = |bytes: u64| {
-    //                         let tx = tx.clone();
-    //                         Box::pin(async move {
-    //                             let _ = tx.send(bytes).await;
-    //                             Ok(())
-    //                         })
-    //                             as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
-    //                     };
-    //                     dir.compress_callback(cfg, crc32, compression_level, &mut f)
-    //                         .await
+    //                     // let mut f = |bytes: u64| {
+    //                     //     let tx = tx.clone();
+    //                     //     Box::pin(async move {
+    //                     //         let _ = tx.send(bytes).await;
+    //                     //         Ok(())
+    //                     //     })
+    //                     //         as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
+    //                     // };
+    //                     dir.compress_callback(cfg, crc32, compression_level).await
     //                 });
     //             }
     //             drop(tx);
@@ -319,15 +317,15 @@ where
         F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
     {
         async move {
-            use std::sync::Arc;
-            use tokio::sync::Semaphore;
+            use binrw::io::cb::Callback;
+            use binrw::io::cb::WriteCallback;
             use tokio::sync::mpsc;
 
             let mut directors_size = 0;
             let mut binding = 0;
             let total_un_compress_size = self.computer_un_compress_size().await?;
             let mut buffered = 0;
-            let mut callback = Self::create_adapter(
+            let callback = Self::create_adapter(
                 total_un_compress_size,
                 &mut buffered,
                 &mut binding,
@@ -335,11 +333,16 @@ where
             );
             let crc32_computer = self.crc32_computer;
             let config = writer.config().clone();
-            let mut writer = BufWriter::with_capacity(32 * 1024, writer);
+            let writer = BufWriter::with_capacity(32 * 1024, writer);
+            let mut writer = WriteCallback::new(writer, callback);
 
             let (tx, mut rx) = mpsc::channel(3);
-            let semaphore = Arc::new(Semaphore::new(1));
-
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
+                // std::thread::available_parallelism()
+                //     .map(|n| n.get())
+                //     .unwrap_or(4),
+                1
+            ));
             let mut sorted_dirs: Vec<_> = self.directories.0.iter_mut().collect();
             sorted_dirs.sort_by(|(_, a), (_, b)| b.compressed_size.cmp(&a.compressed_size));
 
@@ -368,8 +371,7 @@ where
                                     if let Some(mut dir) = data.take() {
                                         //在处理下一个文件之前，已经有数据写入，先处理完
                                         dir.seek_start().await?;
-                                        let len =
-                                            binrw::io::copy(&mut dir, &mut writer).await?;
+                                        let len = binrw::io::copy(&mut dir, &mut writer).await?;
                                         *bytes += len;
                                     }
                                     *bytes += buf.len() as u64;
@@ -406,9 +408,6 @@ where
                                     }
                                 }
                             }
-                            FileTask::Progress { bytes } => {
-                                callback(bytes).await?;
-                            }
                             FileTask::CompressDone { file_index } => {
                                 if active_index == Some(file_index) {
                                     active_index = None;
@@ -422,6 +421,7 @@ where
                                 if active_index != Some(*file_index) {
                                     dir.seek_start().await?;
                                 }
+                                // tokio::time::sleep(Duration::from_millis(1)).await;
                                 let len = binrw::io::copy(&mut dir, &mut writer).await?;
                                 *bytes += len;
                             }
@@ -429,7 +429,7 @@ where
                         }
                     }
 
-                    Ok::<_, Error>((sended_sort_files, stack, writer, callback))
+                    Ok::<_, Error>((sended_sort_files, stack, writer))
                 }
             };
 
@@ -479,27 +479,17 @@ where
                             .map_err(|e| Error::Err(Box::new(e)))?;
 
                             if !is_dir {
-                                let mut progress_callback = |bytes: u64| {
-                                    let tx = tx.clone();
-                                    Box::pin(async move {
-                                        let _ = tx.send(FileTask::Progress { bytes }).await;
-                                        Ok(())
-                                    })
-                                        as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
-                                };
-
                                 let mut write_task = CompressTask {
                                     file_index: index,
                                     pos: 0,
                                     tx: tx.clone(),
                                 };
                                 if let Some((crc32, compressed_size)) = director
-                                    .compress_to_writer_callback(
+                                    .compress_to_writer(
                                         &config,
                                         crc32_computer,
                                         compression_level,
                                         &mut write_task,
-                                        &mut progress_callback,
                                     )
                                     .await?
                                 {
@@ -549,7 +539,7 @@ where
             };
 
             let (tp2, (_, results)) = tokio::join!(merge_listener, results);
-            let (sended_sort_files, stack, mut writer, mut callback) = tp2?;
+            let (sended_sort_files, stack, mut writer) = tp2?;
 
             for res in results {
                 res.map_err(|e| Error::Err(Box::new(e)))??;
@@ -580,8 +570,8 @@ where
                 let header_pos_after = writer.position().await?;
                 directors_size += header_pos_after - header_pos_before;
             }
-
-            callback(0).await?;
+            writer.callback(0).await?;
+            writer.flush().await?;
             self.size = directors_size as u32;
             self.entries = self.directories.len() as u16;
             self.number_of_directory_disk = self.directories.len() as u16;

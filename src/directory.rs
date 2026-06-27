@@ -1,6 +1,7 @@
 use crate::file::{DataDescriptor, ExtraList, ZipFile};
 use crate::hash::{Crc32Reader, HashWriter, HashWriterNull, Hasher};
 use crate::zip::{Config, StreamDefault, ZipModel, is_dir};
+use binrw::io::cb::ReadCallback;
 use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
 use binrw::io::seek::Seek;
@@ -8,7 +9,7 @@ use binrw::io::write::Write;
 use binrw::io::{BufWriter, ReadBytesCallback};
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
 use miniz_oxide::deflate::CompressionLevel;
-use miniz_oxide::inflate::stream::decompress_stream_callback;
+use miniz_oxide::inflate::stream::decompress_stream;
 use std::string::FromUtf8Error;
 
 // #[binrw]
@@ -665,10 +666,9 @@ where
     pub fn compressed(&self) -> bool {
         self.compressed
     }
-    pub fn decompressed_with_writer_callback<'a, W>(
+    pub fn decompressed_with_writer<'a, W>(
         &mut self,
         writer: &'a mut W,
-        callback_fun: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
         W: Write + Seek + Send,
@@ -683,7 +683,7 @@ where
                     config.compress_size_mut(length);
                     // let new_data = T::from_config(&config).await?;
                     // let mut hash_writer = HashWriter::new(new_data);
-                    decompress_stream_callback(&mut *data, writer, callback_fun)
+                    decompress_stream(&mut *data, writer)
                         .await
                         .map_err(|e| Error::Err(Box::new(e)))?;
                     // let value = hash_writer.hash();
@@ -706,9 +706,9 @@ where
             Ok(())
         }
     }
-    pub fn decompressed_callback<'a>(
-        &mut self,
-        callback_fun: &'a mut ReadBytesCallback<'a>,
+    pub fn decompressed_with_callback<'a>(
+        &'a mut self,
+        callback: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             if self.compressed() {
@@ -720,7 +720,8 @@ where
                         config.compress_size_mut(length);
                         let new_data = T::from_config(&config).await?;
                         let mut hash_writer = HashWriter::new(new_data);
-                        decompress_stream_callback(&mut *data, &mut hash_writer, callback_fun)
+                        let mut reader = ReadCallback::new(data, callback);
+                        decompress_stream(&mut reader, &mut hash_writer)
                             .await
                             .map_err(|e| Error::Err(Box::new(e)))?;
                         let value = hash_writer.hash();
@@ -742,10 +743,36 @@ where
             Ok(())
         }
     }
-    pub fn decompressed(&mut self) -> impl Future<Output = BinResult<()>> + Send {
+    pub fn decompressed<'a>(&mut self) -> impl Future<Output = BinResult<()>> + Send {
         async move {
-            self.decompressed_callback(&mut |_| Box::pin(async { Ok(()) }))
-                .await?;
+            if self.compressed() {
+                let (new_data, sha) = {
+                    if let Some(data) = &mut self.data {
+                        data.seek_start().await?;
+                        let mut config = data.config().clone();
+                        let length = data.length().await?;
+                        config.compress_size_mut(length);
+                        let new_data = T::from_config(&config).await?;
+                        let mut hash_writer = HashWriter::new(new_data);
+                        decompress_stream(&mut *data, &mut hash_writer)
+                            .await
+                            .map_err(|e| Error::Err(Box::new(e)))?;
+                        let value = hash_writer.hash();
+                        let mut new_data = hash_writer.into_inner();
+                        new_data.seek_start().await?;
+                        (new_data, value)
+                    } else {
+                        return Err(Error::AssertFail("compressed data is none".to_string()));
+                    }
+                };
+                self.sha_value = Some(sha);
+                self.data = Some(new_data);
+                self.compressed = false;
+            } else {
+                if let Some(data) = &mut self.data {
+                    data.seek_start().await?;
+                }
+            }
             Ok(())
         }
     }
@@ -786,7 +813,6 @@ where
         config: &'a T::Config,
         crc32_computer: bool,
         compression_level: CompressionLevel,
-        callback: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send {
         async move {
             if !self.compressed && self.compression_method == CompressionMethod::Deflate {
@@ -817,7 +843,6 @@ where
                                 &mut crc32_reader,
                                 &mut compress_data,
                                 compression_level,
-                                callback,
                             )
                             .await
                             .map_err(|e| Error::Err(Box::new(e)))?;
@@ -844,13 +869,12 @@ where
             Ok(())
         }
     }
-    pub fn compress_to_writer_callback<'a, W>(
+    pub fn compress_to_writer<'a, W>(
         &'a mut self,
         config: &'a T::Config,
         crc32_computer: bool,
         compression_level: CompressionLevel,
         writer: &'a mut W,
-        callback: &'a mut ReadBytesCallback<'a>,
     ) -> impl Future<Output = BinResult<Option<(u32, u32)>>> + Send
     where
         W: Write + Seek + Send,
@@ -878,7 +902,6 @@ where
                             &mut crc32_reader,
                             writer,
                             compression_level,
-                            callback,
                         )
                         .await
                         .map_err(|e| Error::Err(Box::new(e)))?;
@@ -895,19 +918,6 @@ where
             } else {
                 Ok(None)
             }
-        }
-    }
-    pub fn compress(
-        &mut self,
-        config: &T::Config,
-        crc32_computer: bool,
-        compression_level: CompressionLevel,
-    ) -> impl Future<Output = BinResult<()>> + Send {
-        async move {
-            self.compress_callback(config, crc32_computer, compression_level, &mut |_| {
-                Box::pin(async { Ok(()) })
-            })
-            .await
         }
     }
     pub fn put_data(&mut self, mut stream: T) -> impl Future<Output = BinResult<()>> + Send {

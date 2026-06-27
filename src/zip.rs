@@ -644,9 +644,9 @@ where
         buffered: &'a mut u64,
         sum: &'a mut u64,
         mut cb: CB,
-    ) -> impl FnMut(u64) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> + Send + 'a
+    ) -> impl FnMut(u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send + 'a
     where
-        CB: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> + Send + 'a,
+        CB: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send + 'a,
     {
         move |bytes| {
             if bytes == 0 {
