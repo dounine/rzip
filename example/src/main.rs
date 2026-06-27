@@ -340,7 +340,7 @@ impl Seek for MyData {
 }
 #[tokio::main]
 async fn main() {
-    let data = fs::File::open("./data/hello2.zip".to_string()).unwrap();
+    let data = fs::File::open("./data/fsign.ipa".to_string()).unwrap();
     // let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
     // let data = File::open("./data/SideStore.ipa").unwrap();
     let source = Arc::new(data);
@@ -350,12 +350,10 @@ async fn main() {
     let mut config = MyStreamConfig::default();
     config.source = Some(source.clone());
 
+    let bytes = std::fs::read("./data/fsign.ipa").unwrap();
     // We start with a Shared view of the entire file
-    let mut data: MyData = MyData::Shared {
-        inner: source.clone(),
-        offset: 0,
-        pos: 0,
-        size: file_len,
+    let mut data: MyData = MyData::Mem {
+        inner: Cursor::new(bytes),
         config: config.clone(),
     };
     // data.read_exact()
@@ -373,9 +371,9 @@ async fn main() {
     })
     .await
     .unwrap();
-    // for (key,dir) in &mut zip_file.directories.0{
-    //     dir.decompressed().await.unwrap();
-    // }
+    for (key, dir) in &mut zip_file.directories.0 {
+        dir.decompressed().await.unwrap();
+    }
     // for (key, dir) in &mut zip_file.directories.0 {
     //     if key == "Payload/SideStore.app/AppIcon60x60@2x.png" {
     //         dir.decompressed().unwrap();
@@ -401,7 +399,7 @@ async fn main() {
     dbg!("解析时长", time.elapsed());
     let mut writer = MyData::Mem {
         inner: Cursor::new(vec![]),
-        config,
+        config: config.clone(),
     };
     // let mut data = std::fs::File::open("./data/fsign2.ipa".to_string()).unwrap();
     // zip_file
@@ -453,28 +451,39 @@ async fn main() {
     //     )
     //     .await
     //     .unwrap();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open("./data/output.zip".to_string())
+        .unwrap();
+    let mut output = MyData::File {
+        inner: file,
+        config,
+    };
     zip_file
-        .package_with_stream_callback(
-            &mut writer,
+        .package_with_callback(
+            &mut output,
             CompressionLevel::DefaultLevel,
+            1,
             &mut |total, bytes| {
                 Box::pin(async move {
-                    // println!("{:.2}%", (bytes as f64 / total as f64) * 100.0)
+                    println!("{:.2}%", (bytes as f64 / total as f64) * 100.0);
                     Ok(())
                 })
             },
         )
         .await
         .unwrap();
-    writer.seek_start().await.unwrap();
+    // writer.seek_start().await.unwrap();
     dbg!("压缩时长", time.elapsed());
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open("./data/hello2.zip".to_string())
-        .unwrap();
-    binrw::io::copy(&mut writer, &mut file).await.unwrap();
+    // let mut file = OpenOptions::new()
+    //     .write(true)
+    //     .create(true)
+    //     .truncate(true)
+    //     .open("./data/output.zip".to_string())
+    //     .unwrap();
+    // binrw::io::copy(&mut writer, &mut file).await.unwrap();
     // file.write_all(&writer).unwrap();
     // dbg!(zip_file);
     // println!("Hello, world!");
