@@ -117,7 +117,7 @@ impl BinWrite for ZipFile {
             let extract_zip_spec: u8 = if is_dir(&self.file_name.inner) {
                 0x0a
             } else {
-                0x0e
+                self.extract_zip_spec
             };
             writer.write_le(&extract_zip_spec).await?;
             writer.write_le(&self.extract_os).await?;
