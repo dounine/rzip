@@ -1,14 +1,16 @@
+use binrw::io::bytes::TotalBytesCallbackFn;
 use binrw::io::read::{Read, ReadAt};
 use binrw::io::seek::Seek;
 use binrw::io::write::Write;
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian};
 use fast_zip::CompressionLevel;
 use fast_zip::zip::{Config, FastZip, StreamDefault};
+use indexmap::IndexMap;
 use std::fmt::{Display, Formatter};
-use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, SeekFrom};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -93,7 +95,7 @@ impl BinWrite for MyStreamConfig {
         &'a self,
         writer: &'w mut W,
         endian: Endian,
-        args: Self::Args<'a>,
+        _args: Self::Args<'a>,
     ) -> impl Future<Output = BinResult<()>> + Send + 'w
     where
         'a: 'w,
@@ -340,118 +342,61 @@ impl Seek for MyData {
 }
 #[tokio::main]
 async fn main() {
-    let data = fs::File::open("./data/fsign.ipa".to_string()).unwrap();
+    // let data = fs::File::open("./data/hello2.zip".to_string()).unwrap();
     // let data = fs::read("./data/SideStore.ipa".to_string()).unwrap();
     // let data = File::open("./data/SideStore.ipa").unwrap();
-    let source = Arc::new(data);
+    // let source = Arc::new(data);
     // let file_len =source.len() as u64;
-    let file_len = source.metadata().unwrap().len();
+    // let file_len = source.metadata().unwrap().len();
 
     let mut config = MyStreamConfig::default();
-    config.source = Some(source.clone());
+    // config.source = Some(source.clone());
 
-    let bytes = std::fs::read("./data/fsign.ipa").unwrap();
+    let bytes = std::fs::read("/Users/lake/Downloads/火币-11.4.0.ipa").unwrap();
     // We start with a Shared view of the entire file
     let mut data: MyData = MyData::Mem {
         inner: Cursor::new(bytes),
         config: config.clone(),
     };
-    // data.read_exact()
-    // let mut cursor = Cursor::new(data);
-    // let dd = cursor.get_mut();
     let time = Instant::now();
 
     config.limit_size = Some(1024 * 100);
-    let mut zip_file: FastZip<MyData> = FastZip::parse_with_callback(&mut data, |total, sum| {
+    let mut zip_file: FastZip<MyData> = FastZip::parse_with_callback(&mut data, |bytes, total| {
         Box::pin(async move {
-            let format = format!("{:.2}%", (sum as f64 / total as f64) * 100.0);
-            // println!("process {}", format);
+            let format = format!("{:.2}%", (bytes as f64 / total as f64) * 100.0);
+            println!("process {}", format);
             Ok(())
         })
     })
     .await
     .unwrap();
-    for (key, dir) in &mut zip_file.directories.0 {
-        dir.decompressed().await.unwrap();
-    }
-    // for (key, dir) in &mut zip_file.directories.0 {
-    //     if key == "Payload/SideStore.app/AppIcon60x60@2x.png" {
-    //         dir.decompressed().unwrap();
-    //         // dir.data_mut().decompressed(&config).unwrap();
-    //     }
-    //     // let data = &mut *dir.data.borrow_mut();
-    //     // let len = data.seek(SeekFrom::End(0)).unwrap();
-    //     // let a = &mut *dir.data_mut();
-    // }
-    // for (key, dir) in &mut zip_file.directories.0 {
-    //     if *key == "Payload/Grace.app/Grace" {
-    //         dir.decompressed_callback(&config,&mut |_|{}).unwrap();
+
+    let filter = ["Payload/SideStore.app"];
+
+    // let mut new_dir = IndexMap::new();
+    // for (name, mut d) in zip_file.directories.0 {
+    //     // if name == "Payload/" {
+    //     //     let mut extra_fields = d.file.extra_fields.clone();
+    //     //     extra_fields.0.pop();
+    //     //     // d.file.extra_fields = extra_fields;
+    //     //     println!("come in");
+    //     // }
+    //     if filter.iter().find(|f| name.starts_with(**f)).is_none() {
+    //         new_dir.insert(name, d);
     //     }
     // }
-    // if let Some(dir) = zip_file.directories.get("hi") {
-    //     let mut new_dir = dir.try_clone(&config).unwrap();
-    //     new_dir.file_name = "".into();
-    //     zip_file.add_directory(new_dir).unwrap();
+    // zip_file.directories.0 = new_dir.into_iter().collect();
+    // let filtered_dirs: Vec<_> = zip_file.directories.0.iter().filter(|(f, d)| {
+    //     !f.starts_with("Payload/Grace.app/Flow")
+    // });
+
+    // for (f, d) in &mut zip_file.directories.0 {
+    //     d.decompressed().await.unwrap();
     // }
-    // for (a,v) in &mut zip_file.directories.0{
-    //    let a = v.clone();
-    // }
+
     dbg!("解析时长", time.elapsed());
-    let mut writer = MyData::Mem {
-        inner: Cursor::new(vec![]),
-        config: config.clone(),
-    };
-    // let mut data = std::fs::File::open("./data/fsign2.ipa".to_string()).unwrap();
-    // zip_file
-    //     .add_file(
-    //         MyData::File(
-    //             fs::File::open(
-    //                 "./data/Info.plist"
-    //                     .to_string(),
-    //             )
-    //             .unwrap(),
-    //         ),
-    //         "Payload/MiniApp.app/Frameworks/MiniUiFramework.framework/Info.plist",
-    //     )
-    //     .unwrap();
-    // zip_file.enable_crc32_computer();
-    // let mut file = OpenOptions::new()
-    //     .write(true)
-    //     .create(true)
-    //     .truncate(true)
-    //     .open("./data/hello2.zip".to_string())
-    //     .unwrap();
-    // data.set_position(0);
-    // std::io::copy(&mut data, &mut file).unwrap();
-    // data.set_position(0);
-    // let mut data = Cursor::new(vec![]);
-    // let files = vec![
-    //     "Payload/MiniApp.app/embedded.mobileprovision".to_string(),
-    //     "Payload/MiniApp.app/PkgInfo".to_string(),
-    //     "Payload/MiniApp.app/MiniApp".to_string(),
-    //     "Payload/MiniApp.app/Info.plist".to_string(),
-    //     "Payload/MiniApp.app/META-INF/".to_string(),
-    // ];
-    // // zip_file.directories.retain(|k, v| files.contains(k));
-    // let time = Instant::now();
-    // zip_file.to_bin(&mut data).unwrap();
-    // dbg!("序列化时长", time.elapsed());
-    // let time = Instant::now();
-    // let mut zip_file: FastZip<MyData> = FastZip::from_bin(&mut data).unwrap();
-    // dbg!("反序列化时长", time.elapsed());
-    // // let mut zip_file: FastZip<MyData> = FastZip::parse(&mut data).unwrap();
-    // let time = Instant::now();
-    // // let config = StreamConfig::default();
     let time = Instant::now();
-    // zip_file
-    //     .package(
-    //         &mut writer,
-    //         CompressionLevel::DefaultLevel,
-    //         // &mut |total, size, format| println!("write {}", format),
-    //     )
-    //     .await
-    //     .unwrap();
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
@@ -461,17 +406,19 @@ async fn main() {
         inner: file,
         config,
     };
+    zip_file.enable_crc32_computer();
     zip_file
         .package_with_callback(
             &mut output,
-            CompressionLevel::DefaultLevel,
+            CompressionLevel::NoCompression,
             1,
-            &mut |total, bytes| {
+            &mut TotalBytesCallbackFn::new(| bytes,total| -> Pin<Box<dyn std::future::Future<Output = BinResult<()>> + Send>> {
                 Box::pin(async move {
-                    println!("{:.2}%", (bytes as f64 / total as f64) * 100.0);
+                    // let format = format!("{:.2}%", (bytes as f64 / total as f64) * 100.0);
+                    // println!("process {}", format);
                     Ok(())
                 })
-            },
+            }),
         )
         .await
         .unwrap();

@@ -1,8 +1,11 @@
-use std::{path::Path, pin::Pin};
+use std::path::Path;
 
 use binrw::{
     BinResult,
-    io::{Read, Seek, Write},
+    io::{
+        Read, Seek, Write,
+        bytes::{BytesCallback, BytesToTotalAdapter, TotalBytesCallback},
+    },
 };
 
 use crate::zip::{Config, FastZip, StreamDefault};
@@ -19,7 +22,7 @@ where
         callback: &'a mut F,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
+        F: TotalBytesCallback + Send,
     {
         async move {
             if !output.exists() {
@@ -49,7 +52,7 @@ where
                             let mut processed = 0;
                             while let Some(bytes) = rx.recv().await {
                                 processed += bytes;
-                                callback(total_bytes, processed).await?;
+                                callback.call(processed, total_bytes).await?;
                             }
                             Ok(())
                         });
@@ -60,7 +63,6 @@ where
                                 let file_path = output.join(file_name);
                                 if dir.is_dir() {
                                     use binrw::Error;
-
                                     tokio::fs::create_dir_all(&file_path)
                                         .await
                                         .map_err(|e| Error::Io(e))
@@ -69,9 +71,11 @@ where
                                     if let Some(_data) = &mut dir.data {
                                         // 确保文件的父目录存在
 
-                                        use std::fs::OpenOptions;
+                                        use std::{fs::OpenOptions, pin::Pin};
 
-                                        use binrw::io::{BufWriter, cb::WriteCallback};
+                                        use binrw::io::{
+                                            BufWriter, bytes::BytesCallbackFn, cb::WriteCallback,
+                                        };
                                         if let Some(parent_dir) = file_path.parent() {
                                             if !parent_dir.exists() {
                                                 tokio::fs::create_dir_all(parent_dir).await?;
@@ -83,23 +87,20 @@ where
                                             .create(true)
                                             .truncate(true)
                                             .open(file_path)?;
-                                        let callback = |bytes: u64| {
-                                            use binrw::Error;
-                                            use std::pin::Pin;
-
-                                            let tx = tx.clone();
-                                            Box::pin(async move {
-                                                let _ = tx.send(bytes).await;
-                                                Ok(())
-                                            })
-                                                as Pin<
-                                                    Box<
-                                                        dyn Future<Output = Result<(), Error>>
-                                                            + Send,
-                                                    >,
-                                                >
-                                        };
-
+                                        let callback = BytesCallbackFn::new(
+                                            |bytes| -> Pin<
+                                                Box<
+                                                    dyn std::future::Future<Output = BinResult<()>>
+                                                        + Send,
+                                                >,
+                                            > {
+                                                let tx = tx.clone();
+                                                Box::pin(async move {
+                                                    let _ = tx.send(bytes).await;
+                                                    Ok(())
+                                                })
+                                            },
+                                        );
                                         // file.set_len(data.length().await?)?;
                                         // let mut mmap = unsafe {
                                         //     use memmap2::MmapMut;
@@ -137,10 +138,9 @@ where
             }
             #[cfg(not(feature = "parallel"))]
             {
-                let mut sum = 0;
-                let mut buffered = 0;
-                let mut callback =
-                    Self::create_adapter(total_bytes, &mut buffered, &mut sum, callback);
+                use binrw::io::bytes::BytesToTotalAdapter;
+
+                let mut callback = BytesToTotalAdapter::new(total_bytes, callback);
 
                 for (file_name, dir) in &mut self.directories.0 {
                     let file_path = output.join(file_name);
@@ -152,10 +152,10 @@ where
 
                             use std::fs::OpenOptions;
 
-                            use binrw::io::BufWriter;
+                            use binrw::io::{BufWriter, cb::WriteCallback};
                             if let Some(parent_dir) = file_path.parent() {
                                 if !parent_dir.exists() {
-                                    tokio::fs::create_dir_all(parent_dir).await?;
+                                    std::fs::create_dir_all(parent_dir)?;
                                 }
                             }
                             let file = OpenOptions::new()
@@ -168,6 +168,7 @@ where
                             let mut output = WriteCallback::new(file, callback);
                             dir.decompressed_with_writer(&mut output).await?;
                             output.flush().await?;
+                            (_, callback) = output.into_parts();
                         }
                     }
                 }
@@ -181,16 +182,14 @@ where
         callback: &'a mut F,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        F: FnMut(u64, u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
+        F: TotalBytesCallback + Send,
     {
         async move {
-            let mut sum = 0;
-            let mut buffered = 0;
             let mut total_bytes = 0;
             for (_, dir) in &mut self.directories.0 {
                 total_bytes += dir.compressed_size as u64;
             }
-            let mut callback = Self::create_adapter(total_bytes, &mut buffered, &mut sum, callback);
+            let mut callback = BytesToTotalAdapter::new(total_bytes, callback);
 
             #[cfg(not(feature = "parallel"))]
             {
@@ -211,7 +210,7 @@ where
                     async_scoped::TokioScope::scope_and_collect(|scope| {
                         scope.spawn(async {
                             while let Some(bytes) = rx.recv().await {
-                                callback(bytes).await?;
+                                callback.call(bytes).await?;
                             }
                             Ok(())
                         });
@@ -222,16 +221,23 @@ where
                             let tx = tx.clone();
                             let semaphore = semaphore.clone();
                             scope.spawn(async move {
+                                use std::pin::Pin;
+
+                                use binrw::io::bytes::BytesCallbackFn;
+
                                 let _permit = semaphore.acquire().await.ok();
-                                let mut f = |bytes: u64| {
-                                    let tx = tx.clone();
-                                    Box::pin(async move {
-                                        let _ = tx.send(bytes).await;
-                                        Ok(())
-                                    })
-                                        as Pin<Box<dyn Future<Output = BinResult<()>> + Send>>
-                                };
-                                dir.decompressed_with_callback(&mut f).await
+                                let mut callback = BytesCallbackFn::new(
+                                    |bytes| -> Pin<
+                                        Box<dyn std::future::Future<Output = BinResult<()>> + Send>,
+                                    > {
+                                        let tx = tx.clone();
+                                        Box::pin(async move {
+                                            let _ = tx.send(bytes).await;
+                                            Ok(())
+                                        })
+                                    },
+                                );
+                                dir.decompressed_with_callback(&mut callback).await
                             });
                         }
                         drop(tx);
@@ -252,7 +258,7 @@ where
         files: &'a [String],
     ) -> BinResult<()>
     where
-        F: FnMut(u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
+        F: BytesCallback + Send,
     {
         #[cfg(feature = "parallel")]
         self.decompress_files_parallel(callback, files).await?;
@@ -261,7 +267,7 @@ where
             if let Some(data) = &mut dir.data {
                 data.seek_start().await?;
                 if files.contains(file_name) {
-                    dir.decompressed_callback(callback).await?;
+                    dir.decompressed_with_callback(callback).await?;
                 }
             }
         }
@@ -274,7 +280,7 @@ where
         files: &'a [String],
     ) -> BinResult<()>
     where
-        F: FnMut(u64) -> Pin<Box<dyn Future<Output = BinResult<()>> + Send>> + Send,
+        F: BytesCallback + Send,
     {
         use std::collections::HashSet;
 
@@ -304,7 +310,7 @@ where
             async_scoped::TokioScope::scope_and_collect(|scope| {
                 scope.spawn(async {
                     while let Some(bytes) = rx.recv().await {
-                        callback(bytes).await?;
+                        callback.call(bytes).await?;
                     }
                     Ok(())
                 });
@@ -313,18 +319,22 @@ where
                     let semaphore = semaphore.clone();
                     let tx = tx.clone();
                     scope.spawn(async move {
-                        let _permit = semaphore.acquire().await.ok();
-                        let mut callback = |bytes: u64| {
-                            use binrw::Error;
-                            use std::pin::Pin;
+                        use std::pin::Pin;
 
-                            let tx = tx.clone();
-                            Box::pin(async move {
-                                let _ = tx.send(bytes).await;
-                                Ok(())
-                            })
-                                as Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>
-                        };
+                        use binrw::io::bytes::BytesCallbackFn;
+
+                        let _permit = semaphore.acquire().await.ok();
+                        let mut callback = BytesCallbackFn::new(
+                            |bytes| -> Pin<
+                                Box<dyn std::future::Future<Output = BinResult<()>> + Send>,
+                            > {
+                                let tx = tx.clone();
+                                Box::pin(async move {
+                                    let _ = tx.send(bytes).await;
+                                    Ok(())
+                                })
+                            },
+                        );
                         dir.decompressed_with_callback(&mut callback).await
                     });
                 }

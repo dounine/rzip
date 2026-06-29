@@ -1,6 +1,7 @@
 use crate::file::{DataDescriptor, ExtraList, ZipFile};
 use crate::hash::{Crc32Reader, HashWriter, HashWriterNull, Hasher};
 use crate::zip::{Config, StreamDefault, ZipModel, is_dir};
+use binrw::io::bytes::BytesCallback;
 use binrw::io::cb::ReadCallback;
 use binrw::io::read::Read;
 use binrw::io::read::ReadExt;
@@ -467,7 +468,8 @@ where
             writer
                 .write_le(&(self.file_name.inner.len() as u16))
                 .await?;
-            writer.write_le(&(self.extra_fields.bytes().await?)).await?;
+            let extra_bytes = self.extra_fields.bytes().await?;
+            writer.write_le(&(extra_bytes.len() as u16)).await?;
             writer.write_le(&(self.file_comment.len() as u16)).await?;
             writer.write_le(&self.number_of_starts).await?;
             writer.write_le(&self.internal_file_attributes).await?;
@@ -480,7 +482,8 @@ where
                 .await?;
             writer.write_le(&self.offset_of_local_file_header).await?;
             writer.write_le(&self.file_name).await?;
-            writer.write_le(&self.extra_fields).await?;
+            writer.write_all(&extra_bytes).await?;
+            // writer.write_le(&self.extra_fields).await?;
             writer.write_le(&self.file_comment).await?;
 
             zip_file_writer(writer, endian, &self.file, model, uncompressed_size).await?;
@@ -706,10 +709,13 @@ where
             Ok(())
         }
     }
-    pub fn decompressed_with_callback<'a>(
+    pub fn decompressed_with_callback<'a, C>(
         &'a mut self,
-        callback: &'a mut ReadBytesCallback<'a>,
-    ) -> impl Future<Output = BinResult<()>> + Send {
+        callback: &'a mut C,
+    ) -> impl Future<Output = BinResult<()>> + Send
+    where
+        C: BytesCallback + Send,
+    {
         async move {
             if self.compressed() {
                 let (new_data, sha) = {
@@ -906,6 +912,61 @@ where
                         .await
                         .map_err(|e| Error::Err(Box::new(e)))?;
                     }
+                    let compress_size = writer.position().await? - pos;
+                    Some((crc32_reader.crc32(), compress_size as u32))
+                } else {
+                    self.crc_32_uncompressed_data = 0;
+                    self.file.crc_32_uncompressed_data = 0;
+                    None
+                };
+                self.compressed = true;
+                Ok(result)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+    pub fn compress_to_writer_callback<'a, W, C>(
+        &'a mut self,
+        config: &'a T::Config,
+        crc32_computer: bool,
+        compression_level: CompressionLevel,
+        writer: &'a mut W,
+        callback: &'a mut C,
+    ) -> impl Future<Output = BinResult<Option<(u32, u32)>>> + Send
+    where
+        W: Write + Seek + Send,
+        C: BytesCallback + Send,
+    {
+        async move {
+            if !self.compressed && self.compression_method == CompressionMethod::Deflate {
+                let mut config = config.clone();
+                config.compress_size_mut(self.compressed_size as u64);
+                let result = if let Some(mut data) = self.data.take() {
+                    data.seek_start().await?;
+                    let uncompressed_size = data.length().await?;
+                    self.crc_32_uncompressed_data = 0;
+                    self.file.crc_32_uncompressed_data = 0;
+                    self.uncompressed_size = uncompressed_size as u32;
+                    self.file.uncompressed_size = uncompressed_size as u32;
+                    let mut config = config.clone();
+                    config.compress_size_mut(self.compressed_size as u64);
+                    let mut crc32_reader = Crc32Reader::new(data);
+                    if crc32_computer {
+                        crc32_reader.init_crc32();
+                    }
+                    let mut crc32_reader = ReadCallback::new(crc32_reader, callback);
+                    let pos = writer.position().await?;
+                    if uncompressed_size > 0 {
+                        miniz_oxide::deflate::stream::compress_stream_callback(
+                            &mut crc32_reader,
+                            writer,
+                            compression_level,
+                        )
+                        .await
+                        .map_err(|e| Error::Err(Box::new(e)))?;
+                    }
+                    let crc32_reader = crc32_reader.into_inner();
                     let compress_size = writer.position().await? - pos;
                     Some((crc32_reader.crc32(), compress_size as u32))
                 } else {

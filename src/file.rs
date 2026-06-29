@@ -150,10 +150,11 @@ impl BinWrite for ZipFile {
             writer.write_le(&uncompressed_size).await?;
             let file_name_length = self.file_name.inner.len() as u16;
             writer.write_le(&file_name_length).await?;
-            let extra_field_length = self.extra_fields.bytes().await?;
+            let extra_bytes = self.extra_fields.bytes().await?;
+            let extra_field_length: u16 = extra_bytes.len() as u16;
             writer.write_le(&extra_field_length).await?;
             writer.write_le(&self.file_name).await?;
-            writer.write_le(&self.extra_fields).await?;
+            writer.write_all(&extra_bytes).await?;
             if *model == ZipModel::Bin {
                 writer.write_le(&self.data_position).await?;
                 writer.write_le(&self.data_descriptor).await?;
@@ -243,7 +244,7 @@ pub fn extra_fields_bytes<W: Write + Seek + Send>(
             //修复空文件夹没有ext导致无法签名bug
             let value = ExtraList(vec![
                 Extra::UnixExtendedTimestamp {
-                    mtime: Some(0x66C2AB60_i32),
+                    mtime: Some(0x66C2AB60_u32),
                     atime: None,
                     ctime: None,
                 },
@@ -271,7 +272,7 @@ pub fn extra_fields_write<W: Write + Seek + Send>(
             //修复空文件夹没有ext导致无法签名bug
             let value = ExtraList(vec![
                 Extra::UnixExtendedTimestamp {
-                    mtime: Some(0x66C2AB60_i32),
+                    mtime: Some(0x66C2AB60_u32),
                     atime: None,
                     ctime: None,
                 },
@@ -311,11 +312,11 @@ impl From<Vec<Extra>> for ExtraList {
     }
 }
 impl ExtraList {
-    pub fn bytes(&self) -> impl Future<Output = BinResult<u16>> + Send {
+    pub fn bytes(&self) -> impl Future<Output = BinResult<Vec<u8>>> + Send {
         async move {
             let mut cursor = Cursor::new(vec![]);
             cursor.write_le(&self.0).await?;
-            Ok(cursor.get_ref().len() as u16)
+            Ok(cursor.into_inner())
         }
     }
 }
