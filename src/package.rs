@@ -1,16 +1,11 @@
 use crate::directory::CompressionMethod;
 use crate::file::DataDescriptor;
-use crate::zip::{Config, FastZip, StreamDefault, ZipModel};
-use binrw::io::bytes::BytesCallbackFn;
+use crate::zip::{Config, FastZip, StreamDefault};
 use binrw::io::bytes::NullBytesTotalCallback;
-#[cfg(feature = "parallel")]
 use binrw::io::bytes::TotalBytesCallback;
-use binrw::io::{BufWriter, Read, Seek, Write};
-use binrw::{BinResult, BinWriterExt, Error};
-use indexmap::IndexMap;
+use binrw::io::{Read, Seek, Write};
+use binrw::{BinResult, BinWriterExt};
 use miniz_oxide::deflate::CompressionLevel;
-use std::io::SeekFrom;
-use std::pin::Pin;
 
 #[cfg(feature = "parallel")]
 pub enum FileTask {
@@ -32,6 +27,8 @@ impl binrw::io::Seek for CompressTask {
         pos: std::io::SeekFrom,
     ) -> impl Future<Output = std::io::Result<u64>> + Send {
         async move {
+            use std::io::SeekFrom;
+
             let current_pos = self.pos;
             let new_pos = match pos {
                 SeekFrom::Start(p) => p,
@@ -134,19 +131,22 @@ where
             );
         }
     }
-    // #[cfg(not(feature = "parallel"))]
-    pub fn package_with_callback_single<F>(
+    #[cfg(not(feature = "parallel"))]
+    pub fn package_with_callback_single<C>(
         &mut self,
         writer: &mut T,
         compression_level: CompressionLevel,
         large_file_speed: u32,
-        callback: &mut F,
+        callback: &mut C,
     ) -> impl Future<Output = BinResult<()>> + Send
     where
-        F: TotalBytesCallback + Send,
+        C: TotalBytesCallback + Send,
     {
         async move {
-            use binrw::io::bytes::{BytesCallback, BytesToTotalAdapter};
+            use binrw::io::{
+                BufWriter,
+                bytes::{BytesCallback, BytesToTotalAdapter},
+            };
 
             let mut files_size = 0;
             let mut directors_size = 0;
@@ -175,7 +175,10 @@ where
                         file.flags = 0x08;
                     }
                     writer
-                        .write_le_args(file, (&ZipModel::Parse, director.uncompressed_size))
+                        .write_le_args(
+                            file,
+                            (&crate::zip::ZipModel::Parse, director.uncompressed_size),
+                        )
                         .await?;
                 }
 
@@ -224,7 +227,9 @@ where
                 if director.file.data_descriptor.is_some() {
                     director.flags = 0x08;
                 }
-                writer.write_le_args(director, (&ZipModel::Parse,)).await?;
+                writer
+                    .write_le_args(director, (&crate::zip::ZipModel::Parse,))
+                    .await?;
                 let header_pos_after = writer.position().await?;
                 directors_size += header_pos_after - header_pos_before;
             }
@@ -645,6 +650,8 @@ where
                 async move {
                     use std::{time::Duration, vec};
 
+                    use binrw::Error;
+use indexmap::IndexMap;
                     use tokio::time::interval;
 
                     let mut stack: IndexMap<usize, (Option<T>, u64, bool)> = IndexMap::new();
@@ -759,7 +766,9 @@ where
                             tx: tx.clone(),
                         };
                         scope.spawn(async move {
-                            use crate::package::FileTask;
+                            use binrw::Error;
+
+use crate::package::FileTask;
                             let _permit = semaphore.acquire().await.ok();
                             let is_dir = director.is_dir();
 
@@ -786,6 +795,9 @@ where
                             }
                             write_task.write_all(local_header_writer.get_ref()).await?;
                             if !is_dir {
+                                use binrw::io::bytes::BytesCallbackFn;
+                                use std::pin::Pin;
+
                                 let mut callback = BytesCallbackFn::new(
                                     |bytes| -> Pin<
                                         Box<dyn std::future::Future<Output = BinResult<()>> + Send>,

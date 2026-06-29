@@ -285,12 +285,11 @@ where
         use std::collections::HashSet;
 
         use tokio::sync::mpsc;
-        let (tx, mut rx) = mpsc::channel::<u64>(1024);
-        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4),
-        ));
+        let (tx, mut rx) = mpsc::channel::<u64>(50);
+        let cpu_num = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(cpu_num));
 
         let mut to_decompress = Vec::new();
         let file_set: HashSet<&str> = files.iter().map(|s| s.as_str()).collect();
@@ -309,8 +308,28 @@ where
         let ((), results) = unsafe {
             async_scoped::TokioScope::scope_and_collect(|scope| {
                 scope.spawn(async {
-                    while let Some(bytes) = rx.recv().await {
-                        callback.call(bytes).await?;
+                    use std::time::Duration;
+
+                    let mut tick_time = tokio::time::interval(Duration::from_millis(100));
+                    let mut total_bytes = 0;
+                    loop {
+                        tokio::select! {
+                            bytes = rx.recv() => {
+                                match bytes {
+                                    Some(bytes) => {
+                                        total_bytes += bytes;
+                                    }
+                                    None => {
+                                        callback.call(total_bytes).await?;
+                                        break;
+                                    }
+                                }
+                            }
+                            _ = tick_time.tick() => {
+                               callback.call(total_bytes).await?;
+                               total_bytes = 0;
+                            }
+                        }
                     }
                     Ok(())
                 });
