@@ -35,8 +35,8 @@ pub enum MyData {
 pub struct MyStreamConfig {
     pub value: bool,
     pub limit_size: Option<u64>,
-    pub compress_size: Option<u64>,
-    pub un_compress_size: Option<u64>,
+    pub compress_size: u64,
+    pub un_compress_size: u64,
     pub open_files: u16,
     pub source: Option<Arc<dyn ReadAt>>,
 }
@@ -51,16 +51,10 @@ impl Display for MyStreamConfig {
         }
 
         write!(f, ", compress: ")?;
-        match self.compress_size {
-            Some(size) => write!(f, "{}", size)?,
-            None => write!(f, "None")?,
-        }
+        write!(f, "{}", self.compress_size)?;
 
         write!(f, ", uncompress: ")?;
-        match self.un_compress_size {
-            Some(size) => write!(f, "{}", size)?,
-            None => write!(f, "None")?,
-        }
+        write!(f, "{}", self.compress_size)?;
 
         write!(f, ", open_files: {} }}", self.open_files)
     }
@@ -68,20 +62,20 @@ impl Display for MyStreamConfig {
 impl Config for MyStreamConfig {
     // type Value = bool;
 
-    fn compress_size(&self) -> Option<u64> {
+    fn compress_size(&self) -> u64 {
         self.compress_size
     }
 
-    fn un_compress_size(&self) -> Option<u64> {
+    fn un_compress_size(&self) -> u64 {
         self.un_compress_size
     }
 
     fn compress_size_mut(&mut self, value: u64) {
-        self.compress_size = Some(value);
+        self.compress_size = value;
     }
 
     fn un_compress_size_mut(&mut self, value: u64) {
-        self.un_compress_size = Some(value);
+        self.un_compress_size = value;
     }
 
     fn temp_dir(&self) -> Option<PathBuf> {
@@ -158,7 +152,7 @@ impl StreamDefault for MyData {
         async move {
             let mut config = config.clone();
             config.source = None;
-            if let (Some(size), Some(limit_size)) = (config.compress_size, config.limit_size) {
+            if let (size, Some(limit_size)) = (config.compress_size, config.limit_size) {
                 if size > limit_size {
                     let tempfile = tempfile::tempfile()?;
                     return Ok(Self::File {
@@ -167,7 +161,7 @@ impl StreamDefault for MyData {
                     });
                 }
             }
-            if let (Some(size), Some(limit_size)) = (config.un_compress_size, config.limit_size) {
+            if let (size, Some(limit_size)) = (config.un_compress_size, config.limit_size) {
                 if size > limit_size {
                     let tempfile = tempfile::tempfile()?;
                     return Ok(Self::File {

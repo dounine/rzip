@@ -338,11 +338,11 @@ where
                         reader.set_position(file.data_position).await?;
                     }
                     let config_pos = reader.position().await?;
-                    // let mut config = config.clone();
-                    // config.compress_size_mut(compressed_size as u64);
-                    // config.un_compress_size_mut(uncompressed_size as u64);
+                    let mut config = config.clone();
+                    config.compress_size_mut(compressed_size as u64);
+                    config.un_compress_size_mut(uncompressed_size as u64);
                     let (mut data, need_copy) =
-                        T::from_link_config(config_pos, compressed_size as u64, config).await?;
+                        T::from_link_config(config_pos, compressed_size as u64, &config).await?;
                     if need_copy {
                         let mut take_reader = reader.take(compressed_size as u64);
                         let mut buffer = vec![0u8; 1024 * 8];

@@ -14,8 +14,8 @@ use std::pin::Pin;
 
 pub trait Config: Display + Sync + Send + Clone + Default {
     // type Value;
-    fn compress_size(&self) -> Option<u64>;
-    fn un_compress_size(&self) -> Option<u64>;
+    fn compress_size(&self) -> u64;
+    fn un_compress_size(&self) -> u64;
     fn compress_size_mut(&mut self, value: u64);
     fn un_compress_size_mut(&mut self, value: u64);
     fn temp_dir(&self) -> Option<std::path::PathBuf>;
