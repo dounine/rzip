@@ -5,14 +5,13 @@ use binrw::io::seek::Seek;
 use binrw::io::write::Write;
 use binrw::io::{BufReader, ReadBytesCallback};
 use binrw::{BinRead, BinReaderExt, BinResult, BinWrite, BinWriterExt, Endian, Error};
-use core::fmt::Display;
 use indexmap::IndexMap;
 use std::collections::HashSet;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 
-pub trait Config: Display + Sync + Send + Clone + Default {
+pub trait Config: Sync + Send + Clone + Default {
     // type Value;
     fn compress_size(&self) -> u64;
     fn un_compress_size(&self) -> u64;
